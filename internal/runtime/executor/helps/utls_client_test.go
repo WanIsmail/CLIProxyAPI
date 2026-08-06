@@ -20,12 +20,48 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"golang.org/x/net/proxy"
 )
 
 type utlsClientRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f utlsClientRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type controlledContextDialer struct {
+	started      chan struct{}
+	release      chan struct{}
+	blockDirect  bool
+	directCalls  int
+	contextCalls int
+}
+
+func (d *controlledContextDialer) signalStarted() {
+	d.started <- struct{}{}
+}
+
+func (d *controlledContextDialer) Dial(_, _ string) (net.Conn, error) {
+	d.directCalls++
+	d.signalStarted()
+	if d.blockDirect {
+		<-d.release
+	}
+	return nil, errors.New("synthetic direct dial used")
+}
+
+func (d *controlledContextDialer) DialContext(
+	ctx context.Context,
+	_, _ string,
+) (net.Conn, error) {
+	d.contextCalls++
+	d.signalStarted()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-d.release:
+		return nil, errors.New("synthetic context dial released")
+	}
 }
 
 type claudeCodeTLSFingerprintFixture struct {
@@ -261,6 +297,158 @@ func TestFallbackRoundTripperSelectsProviderFingerprint(t *testing.T) {
 				t.Fatalf("route = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestUtlsRoundTripperRejectsInvalidExplicitProxy(t *testing.T) {
+	roundTripper := newUtlsRoundTripper("not-a-proxy")
+	if roundTripper.dialer == proxy.Direct {
+		t.Fatal("invalid explicit proxy silently selected direct network access")
+	}
+	request, errRequest := http.NewRequest(
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+
+	_, errRoundTrip := roundTripper.RoundTrip(request)
+	if errRoundTrip == nil || !strings.Contains(errRoundTrip.Error(), "configure explicit proxy") {
+		t.Fatalf("RoundTrip error = %v, want sanitized proxy configuration failure", errRoundTrip)
+	}
+}
+
+func TestUtlsRoundTripperUsesRequestContextForDial(t *testing.T) {
+	dialer := &controlledContextDialer{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	roundTripper := newUtlsRoundTripper("")
+	roundTripper.dialer = dialer
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	request, errRequest := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+
+	_, errRoundTrip := roundTripper.RoundTrip(request)
+	if !errors.Is(errRoundTrip, context.DeadlineExceeded) {
+		t.Fatalf("RoundTrip error = %v, want context deadline", errRoundTrip)
+	}
+	if dialer.directCalls != 0 || dialer.contextCalls != 1 {
+		t.Fatalf(
+			"dial calls = direct:%d context:%d, want only one context dial",
+			dialer.directCalls,
+			dialer.contextCalls,
+		)
+	}
+}
+
+func TestUtlsRoundTripperCancelsPendingConnectionWait(t *testing.T) {
+	dialer := &controlledContextDialer{
+		started:     make(chan struct{}, 2),
+		release:     make(chan struct{}),
+		blockDirect: true,
+	}
+	roundTripper := newUtlsRoundTripper("")
+	roundTripper.dialer = dialer
+	firstRequest, errRequest := http.NewRequest(
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := roundTripper.RoundTrip(firstRequest)
+		firstDone <- err
+	}()
+	<-dialer.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	secondRequest, errRequest := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := roundTripper.RoundTrip(secondRequest)
+		secondDone <- err
+	}()
+
+	var secondErr error
+	returnedBeforeRelease := false
+	select {
+	case secondErr = <-secondDone:
+		returnedBeforeRelease = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(dialer.release)
+	if !returnedBeforeRelease {
+		secondErr = <-secondDone
+	}
+	<-firstDone
+
+	if !returnedBeforeRelease {
+		t.Fatal("pending connection wait ignored the request deadline")
+	}
+	if !errors.Is(secondErr, context.DeadlineExceeded) {
+		t.Fatalf("pending wait error = %v, want context deadline", secondErr)
+	}
+}
+
+func TestNewUtlsHTTPClientCanDisableRedirectsFromContext(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	roundTripper := utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		response := &http.Response{
+			Header:  make(http.Header),
+			Body:    io.NopCloser(strings.NewReader("{}")),
+			Request: req,
+		}
+		if calls == 1 {
+			response.StatusCode = http.StatusFound
+			response.Header.Set("Location", "https://example.net/final")
+		} else {
+			response.StatusCode = http.StatusOK
+		}
+		return response, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripper)
+	ctx = WithRedirectsDisabled(ctx)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := NewUtlsHTTPClient(ctx, nil, nil, 0).Do(request)
+	if err != nil {
+		t.Fatalf("client.Do returned error: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want redirect response", response.StatusCode)
+	}
+	if calls != 1 {
+		t.Fatalf("round trips = %d, want 1 with redirects disabled", calls)
 	}
 }
 
