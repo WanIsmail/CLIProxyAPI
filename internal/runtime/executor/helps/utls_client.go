@@ -25,8 +25,23 @@ import (
 type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
-	pending     map[string]*sync.Cond
+	pending     map[string]chan struct{}
 	dialer      proxy.Dialer
+}
+
+type failedContextDialer struct {
+	err error
+}
+
+func (d *failedContextDialer) Dial(_, _ string) (net.Conn, error) {
+	return nil, d.err
+}
+
+func (d *failedContextDialer) DialContext(
+	_ context.Context,
+	_, _ string,
+) (net.Conn, error) {
+	return nil, d.err
 }
 
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
@@ -35,55 +50,68 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			dialer = &failedContextDialer{
+				err: fmt.Errorf("utls: configure explicit proxy: %w", errBuild),
+			}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
 	}
 	return &utlsRoundTripper{
 		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
+		pending:     make(map[string]chan struct{}),
 		dialer:      dialer,
 	}
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
-	t.mu.Lock()
-
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-
-	if cond, ok := t.pending[host]; ok {
-		cond.Wait()
+func (t *utlsRoundTripper) getOrCreateConnection(
+	ctx context.Context,
+	host, addr string,
+) (*http2.ClientConn, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		t.mu.Lock()
 		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
 			t.mu.Unlock()
 			return h2Conn, nil
 		}
+		if pending, ok := t.pending[host]; ok {
+			t.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-pending:
+				continue
+			}
+		}
+
+		pending := make(chan struct{})
+		t.pending[host] = pending
+		t.mu.Unlock()
+
+		h2Conn, err := t.createConnection(ctx, host, addr)
+		t.mu.Lock()
+		delete(t.pending, host)
+		if err == nil {
+			t.connections[host] = h2Conn
+		}
+		close(pending)
+		t.mu.Unlock()
+		return h2Conn, err
 	}
-
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
-
-	h2Conn, err := t.createConnection(host, addr)
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	delete(t.pending, host)
-	cond.Broadcast()
-
-	if err != nil {
-		return nil, err
-	}
-
-	t.connections[host] = h2Conn
-	return h2Conn, nil
 }
 
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
+func (t *utlsRoundTripper) createConnection(
+	ctx context.Context,
+	host, addr string,
+) (*http2.ClientConn, error) {
+	contextDialer, ok := t.dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
+	}
+	conn, err := contextDialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +119,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if err := tlsConn.Handshake(); err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -114,7 +142,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
+	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +384,26 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
+type redirectsDisabledContextKey struct{}
+
+// WithRedirectsDisabled marks outbound requests that must return redirects
+// without following them.
+func WithRedirectsDisabled(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, redirectsDisabledContextKey{}, true)
+}
+
+// RedirectsDisabled reports whether an outbound request must not follow redirects.
+func RedirectsDisabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	disabled, _ := ctx.Value(redirectsDisabledContextKey{}).(bool)
+	return disabled
+}
+
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
 // fingerprints for protected hosts. It uses Claude Code's Node/OpenSSL profile
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
@@ -393,6 +441,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			chrome:    chromeRT,
 			fallback:  standardTransport,
 		},
+	}
+	if RedirectsDisabled(ctx) {
+		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
 	}
 	if timeout > 0 {
 		client.Timeout = timeout

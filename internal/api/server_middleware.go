@@ -40,7 +40,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
+			if isLocalOnlyPath(path) || strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
 				c.Next()
 				return
 			}
@@ -119,13 +119,22 @@ func isExampleAPIKeySafeModeProxyPath(path string) bool {
 	}
 }
 
+func isLocalOnlyPath(path string) bool {
+	return path == "/v0/local" || strings.HasPrefix(path, "/v0/local/")
+}
+
 // corsMiddleware returns a Gin middleware handler that adds CORS headers
-// to every response, allowing cross-origin requests.
+// to browser-accessible responses while leaving local-only routes isolated.
 //
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if isLocalOnlyPath(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
