@@ -1,0 +1,141 @@
+
+============
+== SGLang ==
+============
+
+NVIDIA Release 26.05 (build 320256704)
+SGLang Version 0.5.11+05fb6a52
+Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+
+GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+and the Product-Specific Terms for NVIDIA AI Products
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+
+WARNING: CUDA Minor Version Compatibility mode ENABLED.
+  Using driver version 580.00 which has support for CUDA 13.0.  This container
+  was built with CUDA 13.2 and will be run in Minor Version Compatibility mode.
+  CUDA Forward Compatibility is preferred over Minor Version Compatibility for use
+  with this container but was unavailable:
+  [[System has unsupported display driver / cuda driver combination (CUDA_ERROR_SYSTEM_DRIVER_MISMATCH) cuInit()=803]]
+  See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+
+/usr/local/lib/python3.12/dist-packages/torchao/quantization/quant_api.py:1674: SyntaxWarning: invalid escape sequence '\.'
+  """Configuration class for applying different quantization configs to modules or parameters based on their fully qualified names (FQNs).
+W0815 15:10:25.404000 1 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0815 15:10:25.674000 1 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+/usr/local/lib/python3.12/dist-packages/sglang/srt/layers/attention/fla/utils.py:223: UserWarning: Triton is not supported on current platform, roll back to CPU.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/sglang/launch_server.py:54: UserWarning: 'python -m sglang.launch_server' is still supported, but 'sglang serve' is the recommended entrypoint.
+  Example: sglang serve --model-path <model> [options]
+  warnings.warn(
+[2026-08-15 15:10:30] Failed to get GPU memory capacity from nvidia-smi. Falling back to torch.cuda.mem_get_info(). Reported total GPU memory per device (MiB): [125772], using min: 125772 MiB.
+[2026-08-15 15:10:30] Disabling overlap schedule since mamba no_buffer is not compatible with overlap schedule, try to use --disable-radix-cache if overlap schedule is necessary
+[2026-08-15 15:10:30] Attention backend not specified. Use flashinfer backend by default.
+[2026-08-15 15:10:32] server_args=ServerArgs(model_path='/models/qwen3-coder-next', tokenizer_path='/models/qwen3-coder-next', tokenizer_mode='auto', tokenizer_backend='huggingface', tokenizer_worker_num=1, skip_tokenizer_init=False, load_format='auto', model_loader_extra_config='{}', trust_remote_code=False, context_length=32768, is_embedding=False, enable_multimodal=None, revision=None, model_impl='auto', host='192.168.71.11', port=8100, fastapi_root_path='', grpc_mode=False, skip_server_warmup=False, warmups=None, nccl_port=None, checkpoint_engine_wait_weights_before_ready=False, ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_keyfile_password=None, enable_ssl_refresh=False, enable_http2=False, dtype='auto', quantization=None, quantization_param_path=None, kv_cache_dtype='bfloat16', enable_fp32_lm_head=False, modelopt_quant=None, modelopt_checkpoint_restore_path=None, modelopt_checkpoint_save_path=None, modelopt_export_path=None, quantize_and_serve=False, rl_quant_profile=None, mem_fraction_static=0.75, max_running_requests=1, max_queued_requests=None, max_total_tokens=None, chunked_prefill_size=8192, enable_dynamic_chunking=False, max_prefill_tokens=16384, prefill_max_requests=None, schedule_policy='fcfs', enable_priority_scheduling=False, disable_priority_preemption=False, default_priority_value=None, abort_on_priority_when_disabled=False, schedule_low_priority_values_first=False, priority_scheduling_preemption_threshold=10, schedule_conservativeness=1.0, page_size=1, swa_full_tokens_ratio=0.8, disable_hybrid_swa_memory=False, radix_eviction_policy='lru', enable_prefill_delayer=False, prefill_delayer_max_delay_passes=30, prefill_delayer_token_usage_low_watermark=None, prefill_delayer_forward_passes_buckets=None, prefill_delayer_wait_seconds_buckets=None, device='cuda', tp_size=1, pp_size=1, pp_max_micro_batch_size=None, pp_async_batch_depth=0, stream_interval=1, batch_notify_size=16, stream_response_default_include_usage=False, incremental_streaming_output=False, enable_streaming_session=False, random_seed=142199869, constrained_json_whitespace_pattern=None, constrained_json_disable_any_whitespace=False, watchdog_timeout=300, soft_watchdog_timeout=None, dist_timeout=None, download_dir=None, model_checksum=None, base_gpu_id=0, gpu_id_step=1, sleep_on_idle=False, use_ray=False, custom_sigquit_handler=None, log_level='info', log_level_http=None, log_requests=False, log_requests_level=2, log_requests_format='text', log_requests_target=None, uvicorn_access_log_exclude_prefixes=[], crash_dump_folder=None, show_time_cost=False, enable_metrics=False, grpc_http_sidecar_port=None, enable_mfu_metrics=False, enable_metrics_for_all_schedulers=False, tokenizer_metrics_custom_labels_header='x-custom-labels', tokenizer_metrics_allowed_custom_labels=None, extra_metric_labels=None, bucket_time_to_first_token=None, bucket_inter_token_latency=None, bucket_e2e_request_latency=None, prompt_tokens_buckets=None, generation_tokens_buckets=None, gc_warning_threshold_secs=0.0, decode_log_interval=40, enable_request_time_stats_logging=False, kv_events_config=None, enable_trace=False, otlp_traces_endpoint='localhost:4317', export_metrics_to_file=False, export_metrics_to_file_dir=None, api_key=None, admin_api_key=None, served_model_name='Qwen3-Coder-Next', weight_version='default', chat_template=None, hf_chat_template_name=None, completion_template=None, file_storage_path='sglang_storage', enable_cache_report=False, reasoning_parser=None, strip_thinking_cache=False, tool_call_parser='qwen3_coder', tool_server=None, sampling_defaults='model', dp_size=1, load_balance_method='round_robin', attn_cp_size=1, moe_dp_size=1, dist_init_addr=None, nnodes=1, node_rank=0, json_model_override_args='{}', preferred_sampling_params=None, enable_lora=None, enable_lora_overlap_loading=None, max_lora_rank=None, lora_target_modules=None, lora_paths=None, max_loaded_loras=None, max_loras_per_batch=8, lora_eviction_policy='lru', lora_backend='csgmv', max_lora_chunk_size=16, experts_shared_outer_loras=None, lora_use_virtual_experts=False, lora_strict_loading=False, attention_backend='flashinfer', decode_attention_backend=None, prefill_attention_backend=None, sampling_backend='flashinfer', grammar_backend='xgrammar', mm_attention_backend=None, fp8_gemm_runner_backend='auto', fp4_gemm_runner_backend='auto', nsa_prefill_backend=None, nsa_decode_backend=None, disable_flashinfer_autotune=False, mamba_backend='triton', speculative_algorithm=None, speculative_draft_model_path=None, speculative_draft_model_revision=None, speculative_draft_load_format=None, speculative_num_steps=None, speculative_eagle_topk=None, speculative_num_draft_tokens=None, speculative_dflash_block_size=None, speculative_dflash_draft_window_size=None, speculative_accept_threshold_single=1.0, speculative_accept_threshold_acc=1.0, speculative_token_map=None, speculative_attention_mode='prefill', speculative_draft_attention_backend=None, speculative_moe_runner_backend='auto', speculative_moe_a2a_backend=None, speculative_draft_model_quantization=None, speculative_adaptive=False, speculative_adaptive_config=None, speculative_skip_dp_mlp_sync=False, speculative_ngram_min_bfs_breadth=1, speculative_ngram_max_bfs_breadth=10, speculative_ngram_match_type='BFS', speculative_ngram_max_trie_depth=18, speculative_ngram_capacity=10000000, speculative_ngram_external_corpus_path=None, speculative_ngram_external_sam_budget=0, speculative_ngram_external_corpus_max_tokens=10000000, enable_multi_layer_eagle=False, ep_size=1, moe_a2a_backend='none', moe_runner_backend='auto', record_nolora_graph=True, flashinfer_mxfp4_moe_precision='default', enable_flashinfer_allreduce_fusion=False, enforce_disable_flashinfer_allreduce_fusion=False, enable_aiter_allreduce_fusion=False, deepep_mode='auto', ep_num_redundant_experts=0, ep_dispatch_algorithm=None, init_expert_location='trivial', enable_eplb=False, eplb_algorithm='auto', eplb_rebalance_num_iterations=1000, eplb_rebalance_layers_per_chunk=None, eplb_min_rebalancing_utilization_threshold=1.0, expert_distribution_recorder_mode=None, expert_distribution_recorder_buffer_size=1000, enable_expert_distribution_metrics=False, deepep_config=None, moe_dense_tp_size=None, elastic_ep_backend=None, enable_elastic_expert_backup=False, mooncake_ib_device=None, elastic_ep_rejoin=False, max_mamba_cache_size=None, mamba_ssm_dtype=None, mamba_full_memory_ratio=0.9, mamba_scheduler_strategy='no_buffer', mamba_track_interval=256, linear_attn_backend='triton', linear_attn_decode_backend=None, linear_attn_prefill_backend=None, enable_hierarchical_cache=False, hicache_ratio=2.0, hicache_size=0, hicache_write_policy='write_through', hicache_io_backend='kernel', hicache_mem_layout='layer_first', hicache_storage_backend=None, hicache_storage_prefetch_policy='best_effort', hicache_storage_backend_extra_config=None, enable_hisparse=False, hisparse_config=None, enable_lmcache=False, kt_weight_path=None, kt_method='AMXINT4', kt_cpuinfer=None, kt_threadpool_count=2, kt_num_gpu_experts=None, kt_max_deferred_experts_per_token=None, dllm_algorithm=None, dllm_algorithm_config=None, cpu_offload_gb=0, offload_group_size=-1, offload_num_in_group=1, offload_prefetch_step=1, offload_mode='cpu', enable_mis=False, disable_radix_cache=False, cuda_graph_max_bs=256, cuda_graph_bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], disable_cuda_graph=True, disable_cuda_graph_padding=False, enable_breakable_cuda_graph=False, enable_profile_cuda_graph=False, enable_cudagraph_gc=False, debug_cuda_graph=False, enable_layerwise_nvtx_marker=False, enable_nccl_nvls=False, enable_symm_mem=False, disable_flashinfer_cutlass_moe_fp4_allgather=False, enable_tokenizer_batch_encode=False, disable_tokenizer_batch_decode=False, disable_outlines_disk_cache=False, disable_custom_all_reduce=False, enable_mscclpp=False, enable_torch_symm_mem=False, pre_warm_nccl=False, disable_overlap_schedule=True, enable_mixed_chunk=False, enable_dp_attention=False, enable_dp_attention_local_control_broadcast=False, enable_dp_lm_head=False, enable_two_batch_overlap=False, enable_single_batch_overlap=False, tbo_token_distribution_threshold=0.48, enable_torch_compile=False, disable_piecewise_cuda_graph=True, enforce_piecewise_cuda_graph=False, enable_torch_compile_debug_mode=False, torch_compile_max_bs=32, piecewise_cuda_graph_max_tokens=8192, piecewise_cuda_graph_tokens=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192], piecewise_cuda_graph_compiler='eager', torchao_config='', enable_nan_detection=False, enable_p2p_check=False, triton_attention_reduce_in_fp32=False, triton_attention_num_kv_splits=8, triton_attention_split_tile_size=None, num_continuous_decode_steps=1, delete_ckpt_after_loading=False, enable_memory_saver=False, enable_weights_cpu_backup=False, enable_draft_weights_cpu_backup=False, allow_auto_truncate=False, enable_custom_logit_processor=False, flashinfer_mla_disable_ragged=False, disable_shared_experts_fusion=False, enforce_shared_experts_fusion=False, disable_chunked_prefix_cache=False, disable_fast_image_processor=False, keep_mm_feature_on_device=False, enable_return_hidden_states=False, enable_return_routed_experts=False, scheduler_recv_interval=1, numa_node=None, enable_deterministic_inference=False, rl_on_policy_target=None, enable_attn_tp_input_scattered=False, gc_threshold=None, enable_nsa_prefill_context_parallel=False, nsa_prefill_cp_mode='round-robin-split', enable_fused_qk_norm_rope=False, enable_precise_embedding_interpolation=False, enable_fused_moe_sum_all_reduce=False, enable_prefill_context_parallel=False, prefill_cp_mode='in-seq-split', enable_dynamic_batch_tokenizer=False, dynamic_batch_tokenizer_batch_size=32, dynamic_batch_tokenizer_batch_timeout=0.002, debug_tensor_dump_output_folder=None, debug_tensor_dump_layers=None, debug_tensor_dump_input_file=None, debug_tensor_dump_inject=False, disaggregation_mode='null', disaggregation_transfer_backend='mooncake', disaggregation_bootstrap_port=8998, disaggregation_ib_device=None, disaggregation_decode_enable_radix_cache=False, disaggregation_decode_enable_offload_kvcache=False, num_reserved_decode_tokens=512, disaggregation_decode_polling_interval=1, encoder_only=False, language_only=False, encoder_transfer_backend='zmq_to_scheduler', encoder_urls=[], enable_adaptive_dispatch_to_encoder=False, custom_weight_loader=[], weight_loader_disable_mmap=False, weight_loader_prefetch_checkpoints=False, weight_loader_prefetch_num_threads=4, remote_instance_weight_loader_seed_instance_ip=None, remote_instance_weight_loader_seed_instance_service_port=None, remote_instance_weight_loader_send_weights_group_ports=None, remote_instance_weight_loader_backend='nccl', remote_instance_weight_loader_start_seed_via_transfer_engine=False, engine_info_bootstrap_port=6789, modelexpress_config=None, enable_pdmux=False, pdmux_config_path=None, sm_group_num=8, enable_broadcast_mm_inputs_process=False, enable_prefix_mm_cache=False, mm_enable_dp_encoder=False, mm_process_config={}, limit_mm_data_per_request=None, enable_mm_global_cache=False, decrypted_config_file=None, decrypted_draft_config_file=None, forward_hooks=None, enable_quant_communications=False, msprobe_dump_config=None)
+[2026-08-15 15:10:33] Using default HuggingFace chat template with detected content format: string
+/usr/local/lib/python3.12/dist-packages/torchao/quantization/quant_api.py:1674: SyntaxWarning: invalid escape sequence '\.'
+  """Configuration class for applying different quantization configs to modules or parameters based on their fully qualified names (FQNs).
+/usr/local/lib/python3.12/dist-packages/torchao/quantization/quant_api.py:1674: SyntaxWarning: invalid escape sequence '\.'
+  """Configuration class for applying different quantization configs to modules or parameters based on their fully qualified names (FQNs).
+W0815 15:10:43.748000 195 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0815 15:10:43.784000 194 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0815 15:10:44.036000 195 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0815 15:10:44.071000 194 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Triton cache error: compiled module cuda_utils.so could not be loaded
+Triton cache error: compiled module cuda_utils.so could not be loaded
+/usr/local/lib/python3.12/dist-packages/sglang/srt/layers/attention/fla/utils.py:223: UserWarning: Triton is not supported on current platform, roll back to CPU.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/sglang/srt/layers/attention/fla/utils.py:223: UserWarning: Triton is not supported on current platform, roll back to CPU.
+  warnings.warn(
+[2026-08-15 15:10:50] Init torch distributed begin.
+[2026-08-15 15:10:51] Init torch distributed ends. elapsed=0.18 s, mem usage=0.01 GB
+[2026-08-15 15:10:52] Ignore import error when loading sglang.srt.models.midashenglm: No module named 'torchaudio'
+[2026-08-15 15:10:53] Load weight begin. avail mem=115.14 GB
+[2026-08-15 15:10:53] Detected fp8 checkpoint.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[2026-08-15 15:10:54] using attn output gate!
+Multi-thread loading shards:   0% Completed | 0/40 [00:00<?, ?it/s]Multi-thread loading shards:   2% Completed | 1/40 [00:16<10:41, 16.44s/it]Multi-thread loading shards:   5% Completed | 2/40 [00:18<04:58,  7.84s/it]Multi-thread loading shards:   8% Completed | 3/40 [00:20<03:10,  5.14s/it]Multi-thread loading shards:  10% Completed | 4/40 [00:22<02:20,  3.89s/it]Multi-thread loading shards:  12% Completed | 5/40 [00:24<01:50,  3.16s/it]Multi-thread loading shards:  15% Completed | 6/40 [00:30<02:26,  4.31s/it]Multi-thread loading shards:  18% Completed | 7/40 [00:33<02:04,  3.77s/it]Multi-thread loading shards:  20% Completed | 8/40 [00:35<01:43,  3.25s/it]Multi-thread loading shards:  22% Completed | 9/40 [00:37<01:25,  2.77s/it]Multi-thread loading shards:  25% Completed | 10/40 [00:38<01:15,  2.51s/it]Multi-thread loading shards:  28% Completed | 11/40 [00:41<01:08,  2.36s/it]Multi-thread loading shards:  30% Completed | 12/40 [00:43<01:05,  2.35s/it]Multi-thread loading shards:  32% Completed | 13/40 [00:45<01:00,  2.23s/it]Multi-thread loading shards:  35% Completed | 14/40 [00:47<00:55,  2.12s/it]Multi-thread loading shards:  38% Completed | 15/40 [00:49<00:51,  2.07s/it]Multi-thread loading shards:  40% Completed | 16/40 [00:51<00:49,  2.07s/it]Multi-thread loading shards:  42% Completed | 17/40 [00:52<00:45,  1.98s/it]Multi-thread loading shards:  45% Completed | 18/40 [00:54<00:42,  1.94s/it]Multi-thread loading shards:  48% Completed | 19/40 [00:56<00:39,  1.90s/it]Multi-thread loading shards:  50% Completed | 20/40 [00:58<00:37,  1.86s/it]Multi-thread loading shards:  52% Completed | 21/40 [01:00<00:34,  1.83s/it]Multi-thread loading shards:  55% Completed | 22/40 [01:02<00:33,  1.84s/it]Multi-thread loading shards:  57% Completed | 23/40 [01:03<00:31,  1.84s/it]Multi-thread loading shards:  60% Completed | 24/40 [01:05<00:29,  1.85s/it]Multi-thread loading shards:  62% Completed | 25/40 [01:07<00:27,  1.83s/it]Multi-thread loading shards:  65% Completed | 26/40 [01:09<00:25,  1.81s/it]Multi-thread loading shards:  68% Completed | 27/40 [01:11<00:23,  1.82s/it]Multi-thread loading shards:  70% Completed | 28/40 [01:13<00:22,  1.85s/it]Multi-thread loading shards:  72% Completed | 29/40 [01:14<00:19,  1.81s/it]Multi-thread loading shards:  75% Completed | 30/40 [01:16<00:17,  1.73s/it]Multi-thread loading shards:  78% Completed | 31/40 [01:17<00:14,  1.62s/it]Multi-thread loading shards:  80% Completed | 32/40 [01:18<00:11,  1.40s/it]Multi-thread loading shards:  82% Completed | 33/40 [01:19<00:08,  1.24s/it]Multi-thread loading shards:  85% Completed | 34/40 [01:20<00:06,  1.12s/it]Multi-thread loading shards:  88% Completed | 35/40 [01:21<00:05,  1.03s/it]Multi-thread loading shards:  90% Completed | 36/40 [01:21<00:03,  1.02it/s]Multi-thread loading shards:  92% Completed | 37/40 [01:22<00:02,  1.07it/s]Multi-thread loading shards:  95% Completed | 38/40 [01:23<00:01,  1.09it/s]Multi-thread loading shards:  98% Completed | 39/40 [01:24<00:00,  1.12it/s]Multi-thread loading shards: 100% Completed | 40/40 [01:25<00:00,  1.14it/s]Multi-thread loading shards: 100% Completed | 40/40 [01:25<00:00,  2.13s/it]
+[2026-08-15 15:12:36] Load weight end. elapsed=102.39 s, type=Qwen3NextForCausalLM, quant=fp8, avail mem=39.12 GB, mem usage=76.02 GB.
+[2026-08-15 15:12:36] Using KV cache dtype: torch.bfloat16
+[2026-08-15 15:12:38] Mamba Cache is allocated. max_mamba_cache_size: 67, conv_state size: 0.11GB, ssm_state size: 4.78GB 
+[2026-08-15 15:12:39] KV Cache is allocated. #tokens: 237355, K size: 2.72 GB, V size: 2.72 GB
+[2026-08-15 15:12:39] Memory pool end. avail mem=28.70 GB
+[2026-08-15 15:12:39] Triton cache error: compiled module cuda_utils.so could not be loaded
+/usr/local/lib/python3.12/dist-packages/sglang/srt/layers/attention/fla/utils.py:223: UserWarning: Triton is not supported on current platform, roll back to CPU.
+  warnings.warn(
+[2026-08-15 15:12:40] Linear attention kernel backend: decode=triton, prefill=triton
+[2026-08-15 15:12:40] Using hybrid linear attention backend for hybrid GDN models.
+[2026-08-15 15:12:40] GDN kernel dispatcher: decode=TritonGDNKernel, extend=TritonGDNKernel, verify=TritonGDNKernel packed_decode=True
+[2026-08-15 15:12:40] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
+[2026-08-15 15:12:40] max_total_num_tokens=237355, chunked_prefill_size=8192, max_prefill_tokens=16384, max_running_requests=1, context_len=32768, available_gpu_mem=27.80 GB
+[2026-08-15 15:12:41] INFO:     Started server process [1]
+[2026-08-15 15:12:41] INFO:     Waiting for application startup.
+[2026-08-15 15:12:41] Using default chat sampling params from model generation config: {'temperature': 1.0, 'top_k': 40, 'top_p': 0.95}
+[2026-08-15 15:12:41] INFO:     Application startup complete.
+[2026-08-15 15:12:41] INFO:     Uvicorn running on http://192.168.71.11:8100 (Press CTRL+C to quit)
+[2026-08-15 15:12:42] INFO:     192.168.71.11:45986 - "GET /model_info HTTP/1.1" 200 OK
+[2026-08-15 15:12:42] Triton cache error: compiled module cuda_utils.so could not be loaded
+[2026-08-15 15:12:42] Scheduler hit an exception: Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 3938, in run_scheduler_process
+    scheduler.run_event_loop()
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 1509, in run_event_loop
+    dispatch_event_loop(self)
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 3810, in dispatch_event_loop
+    scheduler.event_loop_normal()
+  File "/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 1522, in event_loop_normal
+    batch = self.get_next_batch_to_run()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 2504, in get_next_batch_to_run
+    new_batch = self.get_new_batch_prefill()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 2559, in get_new_batch_prefill
+    ret = self._get_new_batch_prefill_raw(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/scheduler.py", line 2769, in _get_new_batch_prefill_raw
+    new_batch.prepare_for_extend()
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/managers/schedule_batch.py", line 1718, in prepare_for_extend
+    out_cache_loc, req_pool_indices_tensor, req_pool_indices = alloc_for_extend(
+                                                               ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/mem_cache/common.py", line 478, in alloc_for_extend
+    write_cache_indices(
+  File "/usr/local/lib/python3.12/dist-packages/sglang/srt/mem_cache/common.py", line 124, in write_cache_indices
+    write_req_to_token_pool_triton[(req_pool_indices_tensor.shape[0],)](
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py", line 419, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py", line 713, in run
+    device = driver.active.get_current_device()
+             ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/driver.py", line 28, in active
+    self._active = self.default
+                   ^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/driver.py", line 22, in default
+    self._default = _create_driver()
+                    ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/driver.py", line 10, in _create_driver
+    return active_drivers[0]()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/driver.py", line 719, in __init__
+    self.utils = CudaUtils()  # TODO: make static
+                 ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/driver.py", line 63, in __init__
+    mod = compile_module_from_src(
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/build.py", line 93, in compile_module_from_src
+    return _load_module_from_path(name, cache_path)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/triton/runtime/build.py", line 65, in _load_module_from_path
+    mod = importlib.util.module_from_spec(spec)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 813, in module_from_spec
+  File "<frozen importlib._bootstrap_external>", line 1289, in create_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+ImportError: /tmp/triton/6Q5HJXGX5RTUBEY2F6VFMIAYORCX2YCX25CUTLQDXYWQEJ37C6CQ/cuda_utils.cpython-312-aarch64-linux-gnu.so: failed to map segment from shared object
+
+[2026-08-15 15:12:42] SIGQUIT received. signum=None, frame=None. It usually means one child failed.

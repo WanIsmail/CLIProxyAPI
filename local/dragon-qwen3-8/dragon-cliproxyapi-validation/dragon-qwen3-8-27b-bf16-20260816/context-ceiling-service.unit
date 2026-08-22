@@ -1,0 +1,18 @@
+[Unit]
+Description=Dragon Qwen3.8-27B BF16 context-ceiling candidate
+StartLimitIntervalSec=300
+StartLimitBurst=2
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/docker start --attach dragon-qwen3-8-context-ceiling-20260816
+ExecStop=/usr/bin/docker stop --time=90 dragon-qwen3-8-context-ceiling-20260816
+TimeoutStartSec=1800
+TimeoutStopSec=120
+Restart=no
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,227 @@
+{
+  "schema": "dragon-qwen3-8-context-ceiling-safe-aggregate/v1",
+  "captured_at": "2026-08-16T20:02:41+12:00",
+  "verdict": "READY_FOR_LOCAL",
+  "decision": "Keep the exact pinned BF16 candidate loaded privately at 127.0.0.1:8101. Do not configure CLIProxyAPI, create a tunnel, expose a public listener, or generate local traffic until separately authorized.",
+  "blocker": null,
+  "model": {
+    "repository": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "identity": "Qwen3.8-27B",
+    "format": "official BF16 Safetensors",
+    "artifact_path": "/home/gr33nl4dy/models/Qwen3.8-27B-BF16-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "deployment_manifest_path": "/home/gr33nl4dy/services/qwen3-8-27b-bf16/model-manifest.json",
+    "deployment_manifest_sha256": "660243c28ba7fd1b1e4cbbbc543cc2c56fd204fab35b15f5d8ce49cbee2b8ab5",
+    "artifact_and_manifest_retained": true
+  },
+  "operator_recovery": {
+    "operator_reported_executed": true,
+    "procedure_name": "drop-cache",
+    "dragon_script_path": "/home/gr33nl4dy/bin/drop-cache",
+    "procedure_class": "sync_and_linux_page_cache_drop",
+    "post_recovery_host_mem_available_bytes": 128816332800,
+    "post_recovery_cuda_free_bytes": 127257915392,
+    "limitation": "This procedure handles Linux page cache; it did not release the CUDA allocation retained after the model canary stopped.",
+    "operational_note": "nvtop is an operator display client, not a competing workload; it may nevertheless hold NVIDIA device files and must be handled by exact PID/owner/executable during an explicitly authorized driver cycle."
+  },
+  "scoped_gpu_recovery_attempt": {
+    "authorization": "Named-holder-only bounded reversible window",
+    "authorized_holder_classes": ["statd", "jtop monitors", "nvtop", "nvargus-daemon"],
+    "pre_state_observed_at": "2026-08-16T18:41:37+12:00",
+    "pre_no_workload_check": {
+      "training_process_matches": 0,
+      "evaluation_process_matches": 0,
+      "model_process_matches": 0,
+      "running_container_count": 0,
+      "port_8100_clear": true,
+      "port_8101_clear": true,
+      "protected_listener_total": 0
+    },
+    "first_window_observed_at": "2026-08-16T18:43:14+12:00",
+    "first_window_result": "HOLD_RETRY_REQUIRED",
+    "first_window_note": "The exact nvtop guard rejected an abbreviated username, so nvtop remained running. The three named systemd units were stopped and restored; no unapproved process was touched.",
+    "retry_observed_at": "2026-08-16T18:44:04+12:00",
+    "holder_quiescence": {
+      "nvtop_term": "PASS_exact_identity",
+      "named_systemd_units_stopped": ["nvargus-daemon.service", "jtop.service", "statd.service"],
+      "device_holders_at_reset": []
+    },
+    "reset_result": "BLOCKED_BY_OTHER_DEVICE_CLIENT",
+    "reset_exit_code": 255,
+    "restore_observed_at": "2026-08-16T18:44:10+12:00",
+    "holder_restoration": "PASS",
+    "restored_named_units": ["nvargus-daemon.service", "statd.service", "jtop.service"],
+    "nvtop_restored": "PASS_prestate_tmux_pane",
+    "scope_boundary": "No non-named device client, protected service, or unrelated process was stopped."
+    ,
+    "current_user_clarification": "The operator identified nvtop as the GPU-activity display command and authorized treating it as display-only while preserving exact PID-specific handling.",
+    "full_driver_recovery_cycles": [
+      {
+        "observed_at": "2026-08-16T19:01:45+12:00",
+        "status": "PASS",
+        "procedure_class": "full_nvidia_module_unload_reload",
+        "module_unload_order": ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"],
+        "module_reload_order": ["nvidia", "nvidia_modeset", "nvidia_drm", "nvidia_uvm"],
+        "named_holders_restored": true,
+        "cuda_free_bytes_after": 93232930816
+      },
+      {
+        "observed_at": "2026-08-16T19:08:59+12:00",
+        "status": "PASS",
+        "procedure_class": "full_nvidia_module_unload_reload",
+        "named_holders_restored": true,
+        "cuda_free_bytes_before_service_restart": 94791790592
+      },
+      {
+        "observed_at": "2026-08-16T19:44:07+12:00",
+        "status": "PASS",
+        "procedure_class": "full_nvidia_module_unload_reload",
+        "purpose": "context_ceiling_staircase",
+        "nvtop_exact_pid_quiescence": true,
+        "named_holders_restored": true
+      }
+    ]
+  },
+  "post_named_holder_restore": {
+    "observed_at": "2026-08-16T18:44:45+12:00",
+    "host_mem_available_bytes": 38791852032,
+    "swap_used_bytes": 786432,
+    "named_holders_restored": true,
+    "compute_app_count": 0,
+    "running_container_count": 0,
+    "model_process_matches": 0,
+    "protected_ports_clear": true,
+    "cuda_memory_query": "N/A from nvidia-smi on NVIDIA Thor after reset refusal; the prior exact pinned microprobe remained 3974664192 free bytes at 2026-08-16T18:08:55+12:00"
+  },
+  "runtime": {
+    "image": "nvcr.io/nvidia/vllm@sha256:b799f51f31710249a758e02aef48ea81fea35550f7ec051ec1c72f88c5f482b6",
+    "required_architecture": "arm64",
+    "required_bind": "127.0.0.1:8101",
+    "required_settings": "BF16 weights, BF16 KV cache, TP1, one active sequence, eager, text-only, thinking disabled, output cap 64",
+    "final_max_model_len": 262144,
+    "final_candidate_state": "running",
+    "final_observed_at": "2026-08-16T20:02:41+12:00",
+    "operational_notes_path": "DRAGON-RUNTIME-NOTES.md"
+  },
+  "post_recovery_baseline": {
+    "observed_at": "2026-08-16T17:49:21+12:00",
+    "boot_time": "2026-08-16 17:05:44",
+    "boot_id": "a5184b53-ef1a-4bf9-ab77-cd8efb2379bd",
+    "cuda_free_bytes": 127257915392,
+    "cuda_total_bytes": 131881684992,
+    "host_mem_available_bytes": 128816332800,
+    "swap_used_bytes": 524288,
+    "active_training_or_cpt": false,
+    "active_eval": false,
+    "co_resident_model": false,
+    "protected_ports_unchanged": true,
+    "port_8100_clear": true,
+    "port_8101_clear": true
+  },
+  "runtime_microgate": {
+    "status": "PASS",
+    "device": "NVIDIA Thor",
+    "capability": [11, 0],
+    "torch": "2.12.0a0+5aff3928d8.nv26.05",
+    "torch_cuda": "13.2",
+    "vllm": "0.20.1+7124b12a.dev",
+    "triton": "3.6.0",
+    "target": "GPUTarget(backend='cuda', arch=110, warp_size=32)"
+  },
+  "manual_readiness": {
+    "status": "PASS",
+    "max_model_len": 32768,
+    "health_models_generation_stream_cancellation_negative_privacy": "PASS",
+    "exact_identity": true,
+    "request_logging_disabled": true,
+    "log_driver": "none",
+    "thinking_seen": false,
+    "raw_material_stored": false,
+    "tool_execution": false
+  },
+  "service_restart": {
+    "status": "PASS_AFTER_FULL_DRIVER_MODULE_RELOAD",
+    "observed_at": "2026-08-16T19:10:48+12:00",
+    "controlled_user_service": true,
+    "startup_cuda_free_gib": 94.79,
+    "startup_cuda_total_gib": 122.82,
+    "requested_gpu_memory_utilization": 0.70,
+    "requested_gpu_memory_gib": 85.98,
+    "container_exit_code": 0,
+    "oom_killed": false,
+    "port_8101_after_restart": "one_private_listener",
+    "normalized_failure": null,
+    "initial_attempt": {
+      "observed_at": "2026-08-16T19:07:54+12:00",
+      "status": "FAIL",
+      "normalized_failure": "post-stop_retained_CUDA_allocation"
+    },
+    "post_named_holder_recovery_rerun": "PASS",
+    "post_named_holder_recovery_rerun_reason": "Full NVIDIA module unload/reload restored CUDA headroom before the controlled user-service retry."
+  },
+  "context_staircase": {
+    "authorized_caps": [8192, 16384, 32768, 49152, 65536, 98304, 131072, 163840, 196608, 229376, 245760, 262144],
+    "rungs_tested": [32768, 49152, 65536, 98304, 131072, 163840, 196608, 229376, 245760, 262144],
+    "last_pass": 262144,
+    "first_fail": null,
+    "refinement": "The first 98304 script attempt was discarded as an infrastructure-status false negative; a direct 98304 retry returned docker_run_rc=0 and passed startup plus long-input checks.",
+    "final_qualified_ceiling": 262144,
+    "rung_results": [
+      {"cap": 32768, "status": "PASS", "evidence": "direct_suite_and_controlled_service_restart"},
+      {"cap": 49152, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 65536, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 98304, "status": "PASS", "evidence": "direct_retry_startup_health_and_sanitized_long_input"},
+      {"cap": 131072, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 163840, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 196608, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 229376, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 245760, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"},
+      {"cap": 262144, "status": "PASS", "evidence": "startup_health_and_sanitized_long_input"}
+    ]
+  },
+  "gates": {
+    "post_recovery_baseline": "PASS",
+    "runtime_microgate": "PASS",
+    "manual_32768_readiness": "PASS",
+    "scoped_gpu_recovery": "PASS_AFTER_FULL_NVIDIA_MODULE_RELOAD",
+    "named_holder_restoration": "PASS",
+    "fresh_ready_for_local": "PASS",
+    "service_restart": "PASS_AFTER_FULL_NVIDIA_MODULE_RELOAD",
+    "context_measurement": "PASS_262144",
+    "privacy": "PASS_FINAL_CANDIDATE",
+    "tool_execution": "NOT_PERFORMED",
+    "cli_proxy_api": "UNCHANGED"
+  },
+  "cleanup": {
+    "candidate_container_records": 2,
+    "rollback_container_records": 1,
+    "candidate_unit_file_present": true,
+    "candidate_unit_active": true,
+    "candidate_port_clear": false,
+    "candidate_port_listener_count": 1,
+    "port_8100_clear": true,
+    "model_process_matches": 1,
+    "candidate_triton_cache_removed": false,
+    "final_candidate_retained": true,
+    "model_artifact_retained": true,
+    "deployment_manifest_retained": true
+  },
+  "tool_parser_validation": {
+    "status": "PASS",
+    "observed_at": "2026-08-16T21:01:25+12:00",
+    "parser": "qwen3_coder",
+    "registry_validation": "PASS",
+    "tokenizer_marker_compatibility": "PASS",
+    "required_named_tool": "PASS",
+    "stream_fragment_assembly": "PASS",
+    "synthetic_tool_result_continuation": "PASS_NO_EXECUTION",
+    "controlled_restart": "PASS",
+    "private_endpoint": "127.0.0.1:8101",
+    "protected_ports_clear": true,
+    "request_logging_disabled": true,
+    "raw_material_stored": false,
+    "tool_execution": false,
+    "validation_notes_path": "PARSER-VALIDATION.md"
+  },
+  "next_action": "Keep the final exact candidate private and loaded at 262144. Do not configure CLIProxyAPI, create a tunnel, expose a public/LAN listener, tune precision or utilization, or stop processes by inference."
+}

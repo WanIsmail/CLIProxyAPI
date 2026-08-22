@@ -1,0 +1,62 @@
+{
+  "schema": "guarded-old-qwen3-removal-preflight/v1",
+  "captured_at": "2026-08-16T12:27:14+12:00",
+  "target_host": "dragon",
+  "old_artifact": {
+    "path": "/home/gr33nl4dy/models/Qwen3-Coder-Next-FP8-da6e2ed27304dd39abadd9c82ef50e8de67bdd4c",
+    "canonical_path_matches_exactly": true,
+    "is_symlink": false,
+    "mount_is_separate": false,
+    "filesystem": "/dev/nvme0n1p1 ext4 mounted at /",
+    "repository": "Qwen/Qwen3-Coder-Next-FP8",
+    "revision": "da6e2ed27304dd39abadd9c82ef50e8de67bdd4c",
+    "manifest_file_count": 52,
+    "manifest_payload_bytes": 80407784154,
+    "safetensors_count": 40,
+    "safetensors_bytes": 80381394600,
+    "index_sha256": "0ac9834aa1e30eb60d921d25e1755f97e92dfd47cf74ac2613e474243adcc4cf",
+    "lfs_entries_verified_against_live_manifest": 41,
+    "lfs_sha256_result": "all 41 passed",
+    "rechecked_regular_file_hashes": 12,
+    "nested_cache_file_count": 54,
+    "nested_cache_apparent_bytes": 6415,
+    "all_files_in_exact_deletion_scope": 106,
+    "exact_scope_apparent_bytes": 80407790569,
+    "hard_linked_files": 0
+  },
+  "reference_artifact": {
+    "prior_safe_aggregate": "/home/gr33nl4dy/dev/coder/research/ps-coding-assistant/dragon-cliproxyapi-validation/dragon-qwen3-coder-next-20260816/dragon-qwen3-coder-next-20260816-safe-aggregate.json",
+    "prior_safe_aggregate_sha256": "4e0bcfe188a2e784296f38a8a1e2217b38cea599bc18b8422ec447219c124fdf"
+  },
+  "reference_checks": {
+    "prior_canary_container_absent": true,
+    "model_process_reference_absent": true,
+    "open_file_reference_absent": true,
+    "qwen_service_reference_absent": true,
+    "training_or_cpt_active": false,
+    "failed_holdout_unit_main_pid": 0
+  },
+  "port_snapshot": {
+    "8083": "clear",
+    "8084": "clear",
+    "8090": "clear",
+    "8091": "clear",
+    "8092": "clear",
+    "8100": "clear",
+    "8101": "clear",
+    "9999": "clear"
+  },
+  "capacity_snapshot": {
+    "memory_available_bytes": 127193141248,
+    "home_available_bytes": 432241741824,
+    "thermal_observation": "CPU 39.2C, GPU 38.5C, SoC/Tj within normal idle preflight range"
+  },
+  "dry_run_deletion_inventory": {
+    "only_target": "/home/gr33nl4dy/models/Qwen3-Coder-Next-FP8-da6e2ed27304dd39abadd9c82ef50e8de67bdd4c",
+    "wildcards_used": false,
+    "shared_image_or_audit_files_in_scope": false,
+    "expected_reclaimed_apparent_bytes": 80407790569,
+    "deletion_authorized_by_dispatch": true
+  },
+  "decision": "REMOVE_EXACT_DIRECTORY_ONLY"
+}

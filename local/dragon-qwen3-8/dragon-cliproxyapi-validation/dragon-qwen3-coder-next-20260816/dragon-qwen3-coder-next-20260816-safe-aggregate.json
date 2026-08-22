@@ -1,0 +1,83 @@
+{
+  "schema": "dragon-qwen3-coder-next-validation-safe-aggregate/v1",
+  "thread": "dragon-qwen3-coder-next-20260816",
+  "verdict": "HOLD",
+  "verdict_reason": "The pinned FP8 runtime reached application startup but the scheduler crashed when Triton could not map its CUDA utility shared object on Dragon. The explicitly permitted Q5_K_M fallback was not staged, so no fallback launch was authorized.",
+  "observed_at": {
+    "timezone": "Pacific/Auckland",
+    "last_live_observation": "2026-08-16 03:15:08 NZST",
+    "source_freshness": "Live Dragon SSH, Docker, socket, memory, and filesystem observations; valid only through the stated observation time."
+  },
+  "target": {
+    "host": "dragon",
+    "hardware_model": "NVIDIA Jetson AGX Thor Developer Kit",
+    "architecture": "aarch64",
+    "private_bind": "192.168.71.11",
+    "dedicated_port": 8100,
+    "protected_ports_initially_clear": [8083, 8084, 8090, 8091, 8092, 9999],
+    "initial_port_8100_owner": "none",
+    "preflight_memory_available_after_approved_cache_reclaim_bytes": 126587256832,
+    "preflight_disk_gate": "pass: /home had more than the required 100 GiB free before launch"
+  },
+  "model_custody": {
+    "dispatch_repository_label": "Qwen/Qwen3-Coder-Next",
+    "live_repository": "Qwen/Qwen3-Coder-Next-FP8",
+    "revision": "da6e2ed27304dd39abadd9c82ef50e8de67bdd4c",
+    "license": "apache-2.0",
+    "artifact_path_on_dragon": "/home/gr33nl4dy/models/Qwen3-Coder-Next-FP8-da6e2ed27304dd39abadd9c82ef50e8de67bdd4c",
+    "manifest_file_count": 52,
+    "manifest_payload_bytes": 80407784154,
+    "safetensors_lfs_bytes": 80381394600,
+    "lfs_entries_sha256_verified": 41,
+    "lfs_sha256_verification": "all 41 entries passed sha256sum -c against the live pinned manifest",
+    "index_sha256": "0ac9834aa1e30eb60d921d25e1755f97e92dfd47cf74ac2613e474243adcc4cf"
+  },
+  "runtime": {
+    "image": "nvcr.io/nvidia/sglang@sha256:80cf6f3f99233cc6a4492541d074b9fc54506660e951a66780a3c4a6204d060f",
+    "sglang_version": "0.5.11+05fb6a52",
+    "container_name": "dragon-qwen3-coder-next-20260816",
+    "container_id": "3637a04d743e64c9892a280efea10874a5fcbf8a213fcb947d3844c778ac5d45",
+    "effective_constraints": {
+      "context_length": 32768,
+      "max_running_requests": 1,
+      "tensor_parallel_size": 1,
+      "kv_cache_dtype": "bfloat16",
+      "mem_fraction_static": 0.75,
+      "tool_call_parser": "qwen3_coder",
+      "served_model_name": "Qwen3-Coder-Next",
+      "speculative_decoding": false,
+      "torch_compile": false,
+      "cuda_graph_disabled": true
+    }
+  },
+  "primary_attempt": {
+    "container_started_at_utc": "2026-08-15T15:10:13.632919556Z",
+    "application_startup_at_utc": "2026-08-15T15:12:41Z",
+    "scheduler_failure_at_utc": "2026-08-15T15:12:42Z",
+    "failure_class": "runtime/kernel incompatibility",
+    "normalized_failure": "Triton CUDA utility module failed to map its aarch64 shared-object segment; the scheduler raised ImportError and exited.",
+    "health_and_protocol_tests": "not run: the scheduler crashed before health and layered readiness could pass",
+    "tests_run": 0,
+    "tests_required_by_dispatch": 5,
+    "detailed_log": "/home/gr33nl4dy/dev/coder/research/ps-coding-assistant/dragon-cliproxyapi-validation/dragon-qwen3-coder-next-20260816/logs/docker-startup-fp8.log"
+  },
+  "fallback": {
+    "repository": "Qwen/Qwen3-Coder-Next-GGUF",
+    "revision": "b82fb7382639d97b38fa7672e526c760c2fb358e",
+    "artifact_family": "Qwen3-Coder-Next-Q5_K_M",
+    "staged_on_dragon": false,
+    "prerequisite_check": "no Q5/Q5_K_M candidate or matching model directory was present under /home/gr33nl4dy/models",
+    "action": "HOLD; do not tune the FP8 runtime or perform broad cleanup"
+  },
+  "cleanup": {
+    "new_canary_container_removed": true,
+    "port_8100_clear_after_cleanup": true,
+    "protected_ports_unchanged": true,
+    "model_artifact_retained": true,
+    "detailed_log_mode": "0600",
+    "detailed_log_size_bytes": 26590,
+    "remote_result_root": "/home/gr33nl4dy/dev/coder/research/ps-coding-assistant/dragon-cliproxyapi-validation/dragon-qwen3-coder-next-20260816/"
+  },
+  "next_action": "Stage and independently verify the official Qwen3-Coder-Next-Q5_K_M artifact at its pinned revision, then have the authorized coordinator decide whether to run the isolated fallback.",
+  "raw_material_policy": "No raw prompts, responses, tool arguments, credentials, or authorization headers are included in this aggregate."
+}

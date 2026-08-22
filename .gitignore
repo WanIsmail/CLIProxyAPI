@@ -57,3 +57,5 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+__pycache__/
+*.pyc

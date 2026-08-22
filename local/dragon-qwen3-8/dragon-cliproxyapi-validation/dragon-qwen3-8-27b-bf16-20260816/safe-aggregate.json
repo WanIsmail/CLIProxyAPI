@@ -1,0 +1,64 @@
+{
+  "schema": "dragon-qwen3-8-27b-bf16-safe-aggregate/v1",
+  "verdict": "HOLD",
+  "decision": "Do not configure local CLIProxyAPI yet.",
+  "hold_reason": "The manual canary passed, but the required service-restart readiness gate failed because the host retained insufficient CUDA-visible memory after the canary exited. No second start was attempted after the bounded cooldown because the disposable pinned-image probe remained below the required headroom.",
+  "artifact": {
+    "repository": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "identity": "Qwen3.8-27B",
+    "format": "official BF16 Safetensors",
+    "path": "/home/gr33nl4dy/models/Qwen3.8-27B-BF16-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "payload_bytes": 55586114863,
+    "shard_count": 18,
+    "shard_payload_bytes": 55563006776,
+    "lfs_entries_verified": 19,
+    "lfs_sha256_result": "all 19 passed"
+  },
+  "runtime": {
+    "image": "nvcr.io/nvidia/vllm@sha256:b799f51f31710249a758e02aef48ea81fea35550f7ec051ec1c72f88c5f482b6",
+    "image_id": "sha256:c5c116c732f24a640650e1e6e399112ef7c2b1e80c5fd7c13808b10a579646e6",
+    "architecture": "arm64",
+    "vllm": "0.20.1+7124b12a.dev",
+    "triton_target": "cuda/110",
+    "launch": "TP1, BF16 weights, BF16 KV cache, max_model_len=32768, max_num_seqs=1, gpu_memory_utilization=0.70, enforce_eager, text-only, thinking disabled, private 127.0.0.1:8101"
+  },
+  "gates": {
+    "old_exact_artifact_cleanup": "PASS",
+    "provenance_and_custody": "PASS",
+    "runtime_microgate": "PASS",
+    "manual_readiness_suite": "PASS",
+    "privacy": "PASS",
+    "protected_ports": "PASS",
+    "service_restart_readiness": "FAIL",
+    "tool_execution": "NOT_PERFORMED"
+  },
+  "observations": {
+    "manual_post_warmup_available_memory_gib": 31.87,
+    "required_post_warmup_available_memory_gib": 24,
+    "restart_failure_cuda_free_gib": 32.52,
+    "restart_failure_cuda_total_gib": 122.82,
+    "restart_target_memory_gib": 85.98,
+    "post_cleanup_probe_cuda_free_bytes": 3929804800,
+    "post_cleanup_host_home_available_bytes": 443315593216,
+    "swap_growth": "none observed; approximately 37 MiB in use",
+    "temperature": "approximately 40-42 C during canary"
+  },
+  "cleanup": {
+    "old_artifact_absent": true,
+    "new_candidate_container_absent": true,
+    "new_candidate_unit_file_absent": true,
+    "candidate_port_8101_clear": true,
+    "model_processes_absent": true,
+    "new_model_retained": true,
+    "deployment_manifest_retained": true,
+    "broad_cache_or_process_cleanup": false
+  },
+  "paths": {
+    "deployment_manifest": "/home/gr33nl4dy/services/qwen3-8-27b-bf16/model-manifest.json",
+    "deployment_manifest_sha256": "660243c28ba7fd1b1e4cbbbc543cc2c56fd204fab35b15f5d8ce49cbee2b8ab5",
+    "old_removal_preflight": "/home/gr33nl4dy/dev/coder/research/ps-coding-assistant/dragon-cliproxyapi-validation/dragon-qwen3-8-27b-bf16-20260816/old-qwen3-coder-next-removal-preflight.json",
+    "old_removal_preflight_sha256": "52c85885ef5613f16cd81f96f4eb8914fe0b364c3d458f7b92993ff83a83460d"
+  },
+  "next_action": "Recover the host CUDA/GPU memory state through the operator-approved host procedure, then rerun the same pinned candidate and complete service-restart readiness before any local CLIProxyAPI change."
+}

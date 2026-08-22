@@ -1,0 +1,12 @@
+{"at":"2026-08-16T12:21:41+12:00","event":"ack_sent","message_id":"msg-20260816-122141-codex-ack-qwen3-8-27b-bf16-replacement-dispatch-d34d"}
+{"at":"2026-08-16T12:28:41+12:00","event":"old_artifact_removed","artifact":"Qwen3-Coder-Next-FP8-da6e2ed27304dd39abadd9c82ef50e8de67bdd4c","exact_scope":true,"post_delete_absent":true}
+{"at":"2026-08-16T12:42:38+12:00","event":"new_artifact_staged_and_promoted","repository":"Qwen/Qwen3.8-27B","revision":"1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0","lfs_entries_verified":19}
+{"at":"2026-08-16T12:48:17+12:00","event":"manual_canary_started","container":"dragon-qwen3-8-27b-bf16-20260816","port":8101,"model_mount_read_only":true}
+{"at":"2026-08-16T12:50:54+12:00","event":"manual_readiness_passed","suite":"bounded_direct_readiness"}
+{"at":"2026-08-16T12:55:09+12:00","event":"privacy_canary_passed","log_leak_count":0}
+{"at":"2026-08-16T12:57:11+12:00","event":"service_restart_failed","reason":"insufficient CUDA-visible free memory after manual canary exit"}
+{"at":"2026-08-16T13:07:12+12:00","event":"exact_candidate_cleanup_complete","container_absent":true,"unit_file_absent":true,"port_8101_clear":true,"verdict":"HOLD"}
+{"at":"2026-08-16T19:02:09+12:00","event":"full_driver_module_recovery_complete","cuda_free_bytes":93232930816,"named_holders_restored":true,"nvtop_classification":"display_only_exact_holder"}
+{"at":"2026-08-16T19:10:48+12:00","event":"controlled_service_restart_passed","candidate_port":"127.0.0.1:8101","ready_for_local":true}
+{"at":"2026-08-16T20:02:41+12:00","event":"maximum_context_qualified","max_model_len":262144,"rungs_tested":[32768,49152,65536,98304,131072,163840,196608,229376,245760,262144],"candidate_active":true,"verdict":"READY_FOR_LOCAL"}
+{"at":"2026-08-16T21:01:25+12:00","event":"structural_tool_parser_qualified","parser":"qwen3_coder","candidate_active":true,"controlled_restart":"PASS","named_required_tool":"PASS","stream_fragment_assembly":"PASS","synthetic_tool_result_continuation":"PASS_NO_EXECUTION","privacy":"PASS","verdict":"READY_FOR_LOCAL"}

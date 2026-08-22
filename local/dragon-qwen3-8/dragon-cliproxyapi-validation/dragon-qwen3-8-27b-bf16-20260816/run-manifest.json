@@ -1,0 +1,21 @@
+{
+  "schema": "dragon-qwen3-8-27b-bf16-run-manifest/v1",
+  "thread_id": "dragon-qwen3-8-27b-bf16-20260816",
+  "seat": "codex@gpu",
+  "host": "dragon",
+  "request_message_id": "msg-20260816-122050-claudex@coder-replace-qwen3-coder-next-with-qwen3-8-27b-bf16-270b",
+  "ack_message_id": "msg-20260816-122141-codex-ack-qwen3-8-27b-bf16-replacement-dispatch-d34d",
+  "model_repository": "Qwen/Qwen3.8-27B",
+  "model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "served_model_name": "Qwen3.8-27B",
+  "runtime_image": "nvcr.io/nvidia/vllm@sha256:b799f51f31710249a758e02aef48ea81fea35550f7ec051ec1c72f88c5f482b6",
+  "candidate_port": 8101,
+  "candidate_bind": "127.0.0.1",
+  "started_at": "2026-08-16T12:20:50+12:00",
+  "finished_at": "2026-08-16T13:07:12+12:00",
+  "verdict": "HOLD",
+  "hold_reason": "mandatory service-restart readiness was not proven because the host retained insufficient CUDA-visible memory after the manual canary exited",
+  "cli_proxy_api_changed": false,
+  "raw_prompts_or_responses_stored": false,
+  "generated_tool_arguments_executed": false
+}

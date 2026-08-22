@@ -1,0 +1,18 @@
+# Credential-free excerpt for the Dragon Qwen3.8 provider.
+# Merge under the active CLIProxyAPI configuration's openai-compatibility key.
+openai-compatibility:
+  - name: "dragon-qwen3-8-bf16"
+    base-url: "http://127.0.0.1:18101/v1"
+    models:
+      - name: "Qwen3.8-27B"
+        alias: "dragon-qwen3-8-27b-bf16"
+        display-name: "Dragon Qwen3.8 27B BF16"
+        max-context-length: 262144
+        force-mapping: true
+        input-modalities: [text]
+        output-modalities: [text]
+        is-compat: false
+        # Clamp Claudex high-intent effort to vLLM's accepted maximum.
+        # The Dragon chat template remains thinking-disabled.
+        thinking:
+          levels: [high]

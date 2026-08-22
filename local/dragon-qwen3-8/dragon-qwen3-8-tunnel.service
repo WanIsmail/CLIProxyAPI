@@ -1,0 +1,21 @@
+[Unit]
+Description=Loopback SSH tunnel to Dragon Qwen3.8 service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -o "ServerAliveInterval=30" \
+    -o "ServerAliveCountMax=3" \
+    -o "ExitOnForwardFailure=yes" \
+    -o "BatchMode=yes" \
+    -o "StrictHostKeyChecking=yes" \
+    -L 127.0.0.1:18101:127.0.0.1:8101 \
+    dragon
+Restart=always
+RestartSec=10
+Environment=AUTOSSH_GATETIME=0
+
+[Install]
+WantedBy=default.target

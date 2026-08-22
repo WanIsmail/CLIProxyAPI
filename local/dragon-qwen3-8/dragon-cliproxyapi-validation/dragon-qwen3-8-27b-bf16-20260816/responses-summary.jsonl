@@ -1,0 +1,15 @@
+{"test":"runtime_microgate","status":"PASS","arm64":true,"vllm":"0.20.1+7124b12a.dev","torch_cuda":"13.2","compute_capability":"11.0","triton_target":"cuda/110","cuda_utils_probe":"pass"}
+{"test":"manual_health","status":"PASS","http_status":200}
+{"test":"manual_models","status":"PASS","http_status":200,"exact_identity":true,"model_count":1}
+{"test":"manual_nonstream","status":"PASS","http_status":200,"nonempty":true,"usage_valid":true,"finish_reason_valid":true}
+{"test":"manual_stream","status":"PASS","http_status":200,"sse_events":4,"content_event":true,"terminal_done":true,"framing_valid":true,"usage_valid":true,"finish_reason_valid":true}
+{"test":"manual_cancellation","status":"PASS","initial_status":200,"cancellation_event":true,"health_after_cancel":true,"followup_status":200,"followup_nonempty":true}
+{"test":"manual_bounded_errors","status":"PASS","invalid_model":404,"malformed_request":400,"oversized_context":400,"bounded_capacity_error":400}
+{"test":"manual_context_8k","status":"PASS","token_count":8000,"tokenize_status":200,"completion_status":200,"nonempty":true,"usage_valid":true}
+{"test":"manual_context_16k","status":"PASS","token_count":16000,"tokenize_status":200,"completion_status":200,"nonempty":true,"usage_valid":true}
+{"test":"manual_context_32k","status":"PASS","probe_input_tokens":30000,"tokenize_status":200,"completion_status":200,"nonempty":true,"usage_valid":true}
+{"test":"tool_surface","status":"NOT_RUN","reason":"automatic tool choice disabled and no exact Qwen3.8 parser was verified","generated_tool_arguments_executed":false}
+{"test":"privacy_canary","status":"PASS","http_status":200,"log_leak_count":0}
+{"test":"protected_ports","status":"PASS","protected_ports_unchanged":true,"port_8100_clear":true,"port_8101_private_only":true}
+{"test":"service_restart","status":"FAIL","start_status":1,"container_exit_code":1,"port_8101_clear":true,"root_cause":"CUDA-visible free memory was 32.52 GiB of 122.82 GiB, below the 0.70 startup target of 85.98 GiB"}
+{"test":"post_cleanup","status":"PASS","candidate_container_absent":true,"candidate_unit_file_absent":true,"candidate_unit_active":false,"port_8101_clear":true,"model_processes_absent":true,"artifact_retained":true,"deployment_manifest_retained":true}

@@ -1,0 +1,66 @@
+{
+  "readiness_decision": "HOLD",
+  "coarse_failure_category": "candidate_start_failure/health_unavailable",
+  "candidate": {
+    "identity": {
+      "model": "Qwen/Qwen3.8-27B-FP8",
+      "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "image": "nvcr.io/nvidia/vllm@sha256:b799f51f31710249a758e02aef48ea81fea35550f7ec051ec1c72f88c5f482b6"
+    },
+    "container": {
+      "name": "dragon-qwen3-8-fp8-candidate-20260817",
+      "state": "exited",
+      "exit_code": 1,
+      "oom_killed": false,
+      "restart_count": 0
+    },
+    "listener": {
+      "remote": "127.0.0.1:8102",
+      "state": "never_opened",
+      "alternate_local_tunnel": "127.0.0.1:18102",
+      "alternate_local_tunnel_state": "not_created"
+    }
+  },
+  "reference": {
+    "identity": {
+      "model": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "precision": "BF16",
+      "image": "nvcr.io/nvidia/vllm@sha256:b799f51f31710249a758e02aef48ea81fea35550f7ec051ec1c72f88c5f482b6"
+    },
+    "container": {
+      "name": "dragon-qwen3-8-context-ceiling-20260816",
+      "state": "running"
+    },
+    "listener": {
+      "address": "127.0.0.1:8101",
+      "health": "HTTP 200"
+    }
+  },
+  "effective_configuration": {
+    "weight_precision": "FP8",
+    "weight_format": "e4m3",
+    "activation_scheme": "dynamic",
+    "weight_block_size": "128x128",
+    "kv_cache_precision": "BF16",
+    "context_window_tokens": 262144,
+    "parser": "qwen3_coder",
+    "thinking": false,
+    "text_only": true,
+    "tensor_parallel_size": 1,
+    "eager_execution": true,
+    "scheduler": {
+      "max_num_seqs": 4,
+      "max_num_batched_tokens": "discovered_runtime_default"
+    },
+    "validation_state": "candidate_exited_before_runtime_health_validation"
+  },
+  "bf16_preservation": {
+    "state": "healthy_unchanged",
+    "listener_unchanged": true,
+    "route_unchanged": true,
+    "not_stopped_restarted_renamed_recreated_or_mutated": true,
+    "benchmark_or_route_swap": "not_performed"
+  },
+  "next_corrective_action": "Coordinator/operator reviews the preserved failed candidate and approves a compatible runtime correction for the official Qwen3.8 FP8 artifact. Only after that review and explicit approval may one bounded readiness retry be authorized; keep the failed candidate preserved and BF16 unchanged until then."
+}

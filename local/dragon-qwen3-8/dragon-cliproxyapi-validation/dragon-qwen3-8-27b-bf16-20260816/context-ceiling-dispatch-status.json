@@ -1,0 +1,45 @@
+{
+  "schema": "dragon-qwen3-8-context-ceiling-dispatch-status/v1",
+  "observed_at": "2026-08-16T20:02:41+12:00",
+  "timezone": "Pacific/Auckland",
+  "target": {
+    "repository": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "format": "official BF16 Safetensors",
+    "dragon_bind": "127.0.0.1:8101"
+  },
+  "deployment_gate": {
+    "latest_sanitized_aggregate": "/home/gr33nl4dy/dev/coder/research/ps-coding-assistant/dragon-cliproxyapi-validation/dragon-qwen3-8-27b-bf16-20260816/context-ceiling-safe-aggregate.json",
+    "aggregate_captured_at": "2026-08-16T20:02:41+12:00",
+    "aggregate_verdict": "READY_FOR_LOCAL",
+    "hold_reason": null,
+    "latest_coordinator_response": "msg-20260816-200921-codex@gpu-ready-for-local-qwen3-8-context-ceiling-262144-1053",
+    "latest_coordinator_response_at": "2026-08-16T20:09:21+12:00",
+    "response_delivery": "post_send_verified",
+    "response_doorbell": {
+      "doorbell_sent": true,
+      "post_send_verified": true,
+      "recipient_tab": "coder",
+      "recipient_pane": "terminal_233",
+      "prompt_state": "available",
+      "forced": false
+    },
+    "ready_for_local": true,
+    "final_context_ceiling_tokens": 262144,
+    "final_candidate_active": true
+  },
+  "context_ceiling": {
+    "status": "PASS",
+    "reason": "All authorized context rungs through 262144 passed startup health, sanitized long-input, post-request health, and no-OOM checks.",
+    "planned_rungs": [8192, 16384, 32768, 49152, 65536, 98304, 131072, 163840, 196608, 229376, 245760, 262144],
+    "tested_rungs": [32768, 49152, 65536, 98304, 131072, 163840, 196608, 229376, 245760, 262144],
+    "qualified_ceiling": 262144
+  },
+  "local_integration": {
+    "cliproxyapi_changed": false,
+    "tunnel_created": false,
+    "generation_traffic_sent": false
+  },
+  "next_action": "Keep the exact pinned candidate private and loaded at 262144; do not configure CLIProxyAPI, create a tunnel, expose a public/LAN listener, or tune runtime settings by inference.",
+  "raw_material_policy": "No raw prompts, completions, tool arguments, credentials, authorization headers, mailbox contents, or gated raw materials are included."
+}
