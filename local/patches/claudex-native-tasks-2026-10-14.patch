@@ -1,0 +1,793 @@
+diff --git a/runtime/claude-codex b/runtime/claude-codex
+--- a/runtime/claude-codex
++++ b/runtime/claude-codex
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env bash
+-# Local launcher revision: 2026.09.08.1 (Astra 1M candidate)
++# Local launcher revision: 2026.10.14.1 (native tasks and tab resume)
+ set -euo pipefail
+ 
+ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+@@ -110,6 +110,31 @@
+ if ! command -v jq >/dev/null 2>&1; then
+   printf 'claudex requires jq to prepare its model allowlist\n' >&2
+   exit 1
++fi
++
++# Only a bare terminal launch offers a namesake session. Resolve our own pane,
++# not the globally focused tab; unavailable metadata must not block startup.
++if (($# == 0)) && [[ -t 0 && -t 1 && -t 2 && -n "${ZELLIJ:-}" &&
++  "${ZELLIJ_PANE_ID:-}" =~ ^[0-9]+$ ]] &&
++  command -v zellij >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
++  if tab_name="$(
++    timeout --kill-after=1s 2s zellij action list-panes --all --json 2>/dev/null |
++      jq -ers --arg pane_id "$ZELLIJ_PANE_ID" '
++        select(length == 1) | .[0] | arrays
++        | [.[] | objects
++           | select(.is_plugin == false and (.id | tostring) == $pane_id)]
++        | select(length == 1) | .[0].tab_name | strings
++        | select(test("\\S"))
++        | select(test("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]") | not)
++      ' 2>/dev/null
++  )"; then
++    printf "Resume session '%s'? [y/N] " "$tab_name" >&2
++    if IFS= read -r resume_answer; then
++      case "${resume_answer,,}" in
++        y | yes) set -- "--resume=$tab_name" ;;
++      esac
++    fi
++  fi
+ fi
+ 
+ # COLUMNS is a shell-maintained value but is not exported by default. Export
+@@ -299,7 +324,7 @@
+   esac
+ done
+ if ! $has_explicit_autocompact; then
+-  autocompact_args=(--autocompact 200000)
++  autocompact_args=(--autocompact 900000)
+ fi
+ 
+ runtime_settings="$(
+@@ -313,6 +338,9 @@
+ export CLAUDEX_CONTEXT_POLICY=native-v1
+ export ANTHROPIC_AUTH_TOKEN="$api_key"
+ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
++# Custom gateway IDs need an explicit opt-in to the modern native task tools.
++export CLAUDE_CODE_ENABLE_TODO_TOOLS=1
++export CLAUDE_CODE_ENABLE_TASKS=1
+ # Allow user-selected model to persist via ~/.claude/settings.json or last session
+ unset ANTHROPIC_DEFAULT_OPUS_MODEL
+ unset ANTHROPIC_DEFAULT_SONNET_MODEL
+diff --git a/runtime/claudex-context.md b/runtime/claudex-context.md
+--- a/runtime/claudex-context.md
++++ b/runtime/claudex-context.md
+@@ -23,3 +23,26 @@
+   not a user-facing result.
+ - If an agent fails mid-response, resume it through the agent interface and then
+   wait for its next agent completion notification.
++
++## Native Task Lifecycle — Mandatory
++
++- For every work request, use the actual Claude Code native task list, not a
++  Markdown replacement. Before substantive work, call `TaskList` and use
++  `TaskGet` where details are needed. Continue relevant existing tasks; use
++  `TaskCreate` for missing work, with a proportionate list even for a small job.
++- Use `TaskUpdate` to mark current work `in_progress`, keep pending work and
++  blockers accurate, and mark items `completed` only after verification. Update
++  the list when scope, progress, or blockers change, not just at the beginning
++  and end. Never mark blocked or unverified work complete.
++- After updates and before handing back, refresh and display the full current
++  task list. Keep unfinished work visible with its next action.
++- On resume or after compaction, reconcile the existing list and continue the
++  same task IDs instead of recreating duplicates. Preserve task IDs, statuses,
++  blockers, and next actions in the context summary.
++- Only native task tools mutate task state. Do not edit native task-storage
++  files directly or force unrelated sessions into one shared task list.
++- Respect explicit tool restrictions and authorization boundaries. If native
++  tools are unavailable, state that limitation and clearly label a temporary
++  text checklist as a fallback; never claim it updated the native list. This
++  policy does not authorize extra work, file writes, commits, restarts, or
++  compaction solely to satisfy task tracking.
+diff --git a/runtime/claudex-settings.json b/runtime/claudex-settings.json
+--- a/runtime/claudex-settings.json
++++ b/runtime/claudex-settings.json
+@@ -5,6 +5,30 @@
+     "refreshInterval": 5
+   },
+   "hooks": {
++    "SessionStart": [
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "/home/gr33nl4dy/cliproxyapi/hooks/native-task-reminder.sh",
++            "timeout": 5,
++            "statusMessage": "Restoring native task tracking"
++          }
++        ]
++      }
++    ],
++    "UserPromptSubmit": [
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "/home/gr33nl4dy/cliproxyapi/hooks/native-task-reminder.sh",
++            "timeout": 5,
++            "statusMessage": "Keeping native tasks current"
++          }
++        ]
++      }
++    ],
+     "PreToolUse": [
+       {
+         "matcher": "Read",
+diff --git a/runtime/README.local.md b/runtime/README.local.md
+--- a/runtime/README.local.md
++++ b/runtime/README.local.md
+@@ -1,15 +1,21 @@
+ # Local Claude Code setup
+ 
+-Installed 2026-09-08: launcher revision 2026.09.08.1 and its verified gateway are
+-active. Astra `[1m]` recognition/resume passed; native auto-compaction defaults
+-to 200K, not 1M. Candidate wording below records qualification history. Deployment
+-evidence and rollback: `../local/astra-1m-install-2026-09-08.md`.
+-
+-Gateway discovery revision `2026.09.08.2` is installed: `/model` now advertises
+-`gpt-6-astra[1m]` alongside plain Astra. Relaunch existing Claudex clients to load
+-the updated catalogue, then select the 1M entry. The statusline displays 1M for
+-that selection; native compaction remains 200K. Verification and rollback:
+-`../local/astra-picker-2026-09-08.md`.
++Installed 2026-10-14: launcher revision `2026.10.14.1` enables native task tools,
++defaults native auto-compaction to `900000`, and offers tab-named session resume
++on bare interactive Zellij launches. Explicit arguments remain authoritative.
++Installation, verification and patch record:
++`../local/claudex-native-tasks-2026-10-14.md`.
++
++The 2026-09-08 Astra `[1m]` recognition/resume qualification and its former
++200K compaction default are historical; the default above supersedes 200K.
++The candidate wording below preserves that qualification history, not proof of
++real long-context compaction at the new target. Earlier deployment evidence:
++`../local/astra-1m-install-2026-09-08.md`.
++
++Gateway discovery revision `2026.09.08.2` is unchanged: `/model` advertises
++`gpt-6-astra[1m]` alongside plain Astra. The statusline displays 1M for that
++selection; model context capacity and the native compaction target are separate.
++Gateway verification and rollback: `../local/astra-picker-2026-09-08.md`.
+ 
+ This installation exposes the Codex OAuth account through CLIProxyAPI's
+ Anthropic-compatible endpoint on loopback only.
+@@ -21,6 +27,64 @@
+ Official upgrades must preserve and verify this local endpoint or all Claudex
+ statuslines will retain stale balances. Previous 7.2.133 customizations are
+ historical; this build adds only the account-limits extension to official 7.3.3.
++
++## Native tasks and compaction
++
++The launcher exports `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` and
++`CLAUDE_CODE_ENABLE_TASKS=1`, including when an inherited shell set them to
++`0` or `false`. This exposes modern native task tools for custom gateway models;
++it does not override explicit tool restrictions or set a shared task-list ID.
++A caller's `CLAUDE_CODE_TASK_LIST_ID`, if explicitly supplied, is retained.
++
++`claudex-context.md` and Claude-only global instructions require inspecting the
++existing list before work, creating missing tasks, keeping progress/blockers
++current, and completing tasks only after verification. Resume and compaction
++continue existing task IDs rather than creating duplicates. Wrapper-owned
++SessionStart and UserPromptSubmit hooks reinforce that lifecycle. The hooks
++supply context only: they do not create tasks, write native task storage, or
++block session exit. If task tools are unavailable, the assistant must disclose
++that and label any text checklist as a fallback. `Ctrl+T` toggles the native
++list when tasks exist.
++
++The native default is `--autocompact 900000`. Explicit split and equals-form
++values, including `auto`, win. These launcher changes take effect on the next
++invocation, including a resumed session, not retroactively in a running process.
++No restart or compaction is performed by installing the change. Fixture tests
++verify arguments and hook output; actual new-session task updates and native
++`/autocompact` behavior remain separate live checks.
++
++## Bare launch and session resume
++
++With no arguments, an interactive launch inside Zellij offers:
++
++```text
++Resume session '<calling-pane-tab-name>'? [y/N]
++```
++
++The lookup matches the calling `ZELLIJ_PANE_ID`, ignoring plugin panes and other
++focused tabs. Answer `y` or `yes` (case-insensitive) to pass the exact name as one
++native `--resume=<name>` argument. No, empty input, unrecognized input or EOF
++continues ordinary launch; Ctrl+C cancels before credentials or services are
++touched. It does not auto-rename sessions, scan a custom session index, or retry
++a failed native resume as a new session. Native Claude resolves the name, so a
++missing session is reported by Claude rather than silently replaced.
++
++Any explicit argument bypasses both the optional lookup and the prompt:
++
++```bash
++claudex --resume my-other-session
++claudex --resume "my session with spaces"
++claudex --continue
++claudex --autocompact auto
++```
++
++The suggestion also skips safely outside Zellij, without terminal input/output
++and stderr, or when pane metadata is missing, ambiguous or unusable. Control
++and invisible formatting characters in metadata are rejected before display.
++The optional `zellij`/`timeout` lookup has a two-second timeout and a one-second
++kill grace; missing commands or lookup failure do not prevent ordinary launch.
++The existing `claudex` alias already points at this launcher; no reinstall is
++needed.
+ 
+ ## GPT-6 Astra
+ 
+@@ -91,7 +155,8 @@
+ a selectable Sol-backed specialty route unless OpenAI publishes different
+ response-label semantics.
+ 
+-Start Claude Code with GPT-5.6-sol:
++Start Claudex with saved model selection retained (a bare interactive Zellij
++launch may offer to resume the tab's namesake session):
+ 
+ ```bash
+ ./claude-codex
+@@ -146,14 +211,14 @@
+ launcher also enables Claude Code's
+ permission-bypass mode, enables `/effort` for the gateway model, caps concurrent
+ read-only tools and subagents at three, defaults native `--autocompact` to
+-200000, loads claudex-only preservation guidance from
++900000, loads claudex-only preservation guidance from
+ `claudex-context.md`, loads claudex-only hooks from `claudex-settings.json`, and
+ disables deferred tool search. The launcher removes the deprecated `TaskOutput`
+ tool, while the hook blocks reads that resolve to a subagent's internal JSONL
+ transcript; background-agent results arrive through Claude Code's completion
+ notifications instead.
+-The conservative compaction default is intentional and independent of model
+-capacity. An explicit `--autocompact VALUE` or `--autocompact=VALUE` before the
++The 900000-token compaction target is the operator's preference; it does not
++change model capacity. An explicit `--autocompact VALUE` or `--autocompact=VALUE` before the
+ argument terminator wins; values after `--` are not parsed as launcher options.
+ The launcher no longer exports a default `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, but
+ passes through an explicitly supplied value unchanged. It does not force an
+diff --git a/runtime/tests/claude-codex-model.sh b/runtime/tests/claude-codex-model.sh
+--- a/runtime/tests/claude-codex-model.sh
++++ b/runtime/tests/claude-codex-model.sh
+@@ -12,7 +12,13 @@
+ TEST_TMP="$(mktemp -d "$ROOT/tmp/claudex-launcher-test.XXXXXX")"
+ readonly TEST_TMP
+ export CLAUDEX_GATEWAY_CACHE="$TEST_TMP/gateway-models.json"
++export CLIPROXY_CONFIG="$TEST_TMP/config.yaml"
++export HOME="$TEST_TMP/home"
++export CLAUDE_CONFIG_DIR="$HOME/.claude"
++printf 'api-keys:\n  - "fixture-only-not-a-credential"\n' >"$CLIPROXY_CONFIG"
++mkdir -p "$CLAUDE_CONFIG_DIR"
+ trap 'rm -rf -- "$TEST_TMP"' EXIT
++trap 'printf "FAIL: launcher regression at line %s\n" "$LINENO" >&2' ERR
+ 
+ assert_launcher_rejected() {
+   local expected_message="$1"
+@@ -43,7 +49,11 @@
+   local actual_count
+ 
+   actual_count="$(grep -Fxc "arg=$argument" <<<"$output" || true)"
+-  [[ "$actual_count" -eq "$expected_count" ]]
++  [[ "$actual_count" -eq "$expected_count" ]] || {
++    printf 'FAIL: expected %s occurrence(s) of argument %s, got %s\n' \
++      "$expected_count" "$argument" "$actual_count" >&2
++    return 1
++  }
+ }
+ 
+ # The expressions below are literal launcher source assertions, not expansions.
+@@ -78,6 +88,15 @@
+ grep -Fxq 'context_policy=native-v1' <<<"$default_output"
+ grep -Fq 'base_url=http://127.0.0.1:8318' <<<"$default_output"
+ grep -Fq 'gateway_discovery=1' <<<"$default_output"
++task_flags_valid=true
++for expected_flag in todo_tools=1 tasks=1; do
++  if ! grep -Fxq "$expected_flag" <<<"$default_output"; then
++    printf 'FAIL: child Claude did not receive %s\n' "$expected_flag" >&2
++    task_flags_valid=false
++  fi
++done
++$task_flags_valid
++grep -Fxq 'task_list_id=' <<<"$default_output"
+ # Model selection now delegated to settings.json - no longer exported
+ grep -Fq 'custom_model_name=gpt-5-6-sol' <<<"$default_output"
+ grep -Fq 'custom_model_description=From gateway' <<<"$default_output"
+@@ -106,27 +125,48 @@
+ grep -Fq 'arg=--resume' <<<"$default_output"
+ grep -Fq 'arg=test-session' <<<"$default_output"
+ assert_arg_count "$default_output" '--autocompact' 1
+-assert_arg_count "$default_output" '200000' 1
++assert_arg_count "$default_output" '900000' 1
+ grep -Fxq -- '--user is-active --quiet cliproxyapi.service' "$default_systemctl_log"
+ grep -Fxq -- '--user is-active --quiet claudex-gateway.service' "$default_systemctl_log"
++
++# Enable the modern native tools even if an older shell disabled them. Tool
++# restrictions and explicitly chosen list identity must still pass through.
++for disabled_value in 0 false; do
++  disabled_tasks_output="$(
++    PATH="$FIXTURE_BIN:$PATH" \
++      CLAUDE_CODE_ENABLE_TODO_TOOLS="$disabled_value" \
++      CLAUDE_CODE_ENABLE_TASKS="$disabled_value" \
++      CLAUDE_CODE_TASK_LIST_ID=fixture-user-list \
++      "$LAUNCHER" --continue --disallowedTools TaskCreate --tools Bash,Read
++  )"
++  grep -Fxq 'todo_tools=1' <<<"$disabled_tasks_output"
++  grep -Fxq 'tasks=1' <<<"$disabled_tasks_output"
++  grep -Fxq 'task_list_id=fixture-user-list' <<<"$disabled_tasks_output"
++  assert_arg_count "$disabled_tasks_output" 'TaskCreate' 1
++  assert_arg_count "$disabled_tasks_output" 'TaskOutput' 1
++  assert_arg_count "$disabled_tasks_output" '--tools' 1
++  assert_arg_count "$disabled_tasks_output" 'Bash,Read' 1
++  assert_arg_count "$disabled_tasks_output" '--dangerously-skip-permissions' 1
++  assert_arg_count "$disabled_tasks_output" '--allow-dangerously-skip-permissions' 1
++done
+ 
+ split_compact_output="$(PATH="$FIXTURE_BIN:$PATH" "$LAUNCHER" --autocompact 500000 --continue)"
+ grep -Fxq 'compact=' <<<"$split_compact_output"
+ assert_arg_count "$split_compact_output" '--autocompact' 1
+ assert_arg_count "$split_compact_output" '500000' 1
+-assert_arg_count "$split_compact_output" '200000' 0
++assert_arg_count "$split_compact_output" '900000' 0
+ 
+ auto_compact_output="$(PATH="$FIXTURE_BIN:$PATH" "$LAUNCHER" --autocompact auto --continue)"
+ grep -Fxq 'compact=' <<<"$auto_compact_output"
+ assert_arg_count "$auto_compact_output" '--autocompact' 1
+ assert_arg_count "$auto_compact_output" 'auto' 1
+-assert_arg_count "$auto_compact_output" '200000' 0
++assert_arg_count "$auto_compact_output" '900000' 0
+ 
+ equals_compact_output="$(PATH="$FIXTURE_BIN:$PATH" "$LAUNCHER" --autocompact=500000 --continue)"
+ grep -Fxq 'compact=' <<<"$equals_compact_output"
+ assert_arg_count "$equals_compact_output" '--autocompact=500000' 1
+ assert_arg_count "$equals_compact_output" '--autocompact' 0
+-assert_arg_count "$equals_compact_output" '200000' 0
++assert_arg_count "$equals_compact_output" '900000' 0
+ 
+ # Claude Code 2.1.261 declines a discovered gateway session model if it differs
+ # from the saved global default. Restore an explicit UUID using that session's
+@@ -205,7 +245,7 @@
+ grep -Fq 'arg=--settings' <<<"$terminator_output"
+ grep -Fq 'arg={}' <<<"$terminator_output"
+ assert_arg_count "$terminator_output" '--autocompact' 2
+-assert_arg_count "$terminator_output" '200000' 1
++assert_arg_count "$terminator_output" '900000' 1
+ 
+ override_output="$({
+   PATH="$FIXTURE_BIN:$PATH" \
+@@ -216,7 +256,7 @@
+ grep -Fq 'compact=700000' <<<"$override_output"
+ grep -Fq 'arg=--continue' <<<"$override_output"
+ assert_arg_count "$override_output" '--autocompact' 1
+-assert_arg_count "$override_output" '200000' 1
++assert_arg_count "$override_output" '900000' 1
+ 
+ custom_gateway_cache="$TEST_TMP/custom-gateway-models.json"
+ custom_systemctl_log="$TEST_TMP/custom-systemctl.log"
+diff --git a/runtime/tests/fixtures/bin/claude b/runtime/tests/fixtures/bin/claude
+--- a/runtime/tests/fixtures/bin/claude
++++ b/runtime/tests/fixtures/bin/claude
+@@ -37,6 +37,9 @@
+ printf 'context_policy=%s\n' "${CLAUDEX_CONTEXT_POLICY:-}"
+ printf 'base_url=%s\n' "${ANTHROPIC_BASE_URL:-}"
+ printf 'gateway_discovery=%s\n' "${CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:-}"
++printf 'todo_tools=%s\n' "${CLAUDE_CODE_ENABLE_TODO_TOOLS:-}"
++printf 'tasks=%s\n' "${CLAUDE_CODE_ENABLE_TASKS:-}"
++printf 'task_list_id=%s\n' "${CLAUDE_CODE_TASK_LIST_ID:-}"
+ printf 'subagent_model=%s\n' "${CLAUDE_CODE_SUBAGENT_MODEL:-}"
+ printf 'custom_model=%s\n' "${ANTHROPIC_CUSTOM_MODEL_OPTION:-}"
+ printf 'custom_model_name=%s\n' "${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-}"
+@@ -49,3 +52,11 @@
+ printf 'available_models=%s\n' "$available_models"
+ printf 'enforce_available_models=%s\n' "$enforce_available_models"
+ printf 'arg=%s\n' "$@"
++
++if [[ -n "${CLIPROXY_TEST_CLAUDE_ARGS_FILE:-}" ]]; then
++  printf '%s\0' "$@" >"$CLIPROXY_TEST_CLAUDE_ARGS_FILE"
++fi
++if [[ -n "${CLIPROXY_TEST_CLAUDE_LOG:-}" ]]; then
++  printf 'invoked\n' >>"$CLIPROXY_TEST_CLAUDE_LOG"
++fi
++exit "${CLIPROXY_TEST_CLAUDE_EXIT:-0}"
+diff --git a/runtime/hooks/native-task-reminder.sh b/runtime/hooks/native-task-reminder.sh
+new file mode 100755
+--- /dev/null
++++ b/runtime/hooks/native-task-reminder.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Stateless context only: native tools, never this hook, own task state.
++output="$(jq -cs '
++  if length != 1 or (.[0] | type) != "object" then {}
++  else
++    .[0].hook_event_name as $event
++    | if $event == "SessionStart" or $event == "UserPromptSubmit" then
++        {hookSpecificOutput: {
++          hookEventName: $event,
++          additionalContext: "For every Claudex work request, use TaskList before substantive work to reconcile the native task list; use TaskGet for details and TaskCreate only for missing work. Use TaskUpdate to mark current work in_progress, keep progress and blockers current, and mark completed only after verification. After changes and before handing back, refresh and display the full list. On resume or compaction, continue existing task IDs instead of duplicating them. Respect explicit tool restrictions: if native tools are unavailable, disclose that and label any temporary text checklist as a fallback, never as a native update. Do not write task storage directly or force unrelated sessions into one list. This reminder creates no tasks and authorizes no additional work, file writes, commits, restarts, or compaction."
++        }}
++      else {} end
++  end
++' 2>/dev/null)" || output='{}'
++printf '%s\n' "$output"
+diff --git a/runtime/tests/claudex-native-task-reminder.py b/runtime/tests/claudex-native-task-reminder.py
+new file mode 100644
+--- /dev/null
++++ b/runtime/tests/claudex-native-task-reminder.py
+@@ -0,0 +1,92 @@
++#!/usr/bin/env python3
++"""Offline checks for native task reminders and their wrapper-only wiring."""
++
++import json
++from pathlib import Path
++import subprocess
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++HOOK = ROOT / "hooks/native-task-reminder.sh"
++SETTINGS = ROOT / "claudex-settings.json"
++
++
++class NativeTaskReminderTests(unittest.TestCase):
++    def run_hook(self, payload):
++        self.assertTrue(HOOK.is_file(), "native task reminder helper is missing")
++        result = subprocess.run(
++            ["bash", str(HOOK)], input=payload, text=True,
++            capture_output=True, timeout=5, check=False,
++        )
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stderr, "")
++        return json.loads(result.stdout)
++
++    def test_lifecycle_events_emit_only_event_correct_context(self):
++        events = [("SessionStart", source) for source in
++                  ("startup", "resume", "compact", "clear", "fork")]
++        events.append(("UserPromptSubmit", None))
++        for event, source in events:
++            with self.subTest(event=event, source=source):
++                payload = {"hook_event_name": event, "source": source,
++                           "prompt": "UNTRUSTED_PROMPT_SENTINEL",
++                           "transcript_path": "/do-not-read/transcript.jsonl"}
++                output = self.run_hook(json.dumps(payload))
++                self.assertEqual(set(output), {"hookSpecificOutput"})
++                specific = output["hookSpecificOutput"]
++                self.assertEqual(set(specific), {"hookEventName", "additionalContext"})
++                self.assertEqual(specific["hookEventName"], event)
++                context = specific["additionalContext"]
++                for required in ("TaskList", "TaskCreate", "TaskUpdate", "in_progress",
++                                 "verification", "resume", "compaction", "restrictions"):
++                    self.assertIn(required, context)
++                self.assertNotIn("UNTRUSTED_PROMPT_SENTINEL", context)
++                self.assertNotIn("/do-not-read/", context)
++
++    def test_malformed_or_unsupported_events_are_nonblocking(self):
++        for payload in ("", "{broken", "null", "[]", '"SessionStart"', "{}",
++                        '{"hook_event_name":null}',
++                        '{"hook_event_name":"Stop"}',
++                        '{"hook_event_name":"PreToolUse"}',
++                        '{"hook_event_name":"SessionStart"}\n{}'):
++            with self.subTest(payload=payload):
++                self.assertEqual(self.run_hook(payload), {})
++
++    def test_wrapper_settings_keep_guard_and_register_reminders(self):
++        settings = json.loads(SETTINGS.read_text())
++        self.assertEqual(settings["statusLine"], {
++            "type": "command", "command": "/home/gr33nl4dy/.local/bin/statusline",
++            "refreshInterval": 5,
++        })
++        hooks = settings["hooks"]
++        self.assertNotIn("Stop", hooks)
++        self.assertTrue(any(
++            entry.get("matcher") == "Read" and any(
++                Path(hook["command"]).resolve() == ROOT / "hooks/guard-agent-output.sh"
++                for hook in entry["hooks"])
++            for entry in hooks["PreToolUse"]
++        ))
++        for event in ("SessionStart", "UserPromptSubmit"):
++            with self.subTest(event=event):
++                self.assertIn(event, hooks)
++                reminders = [hook for entry in hooks[event] for hook in entry["hooks"]
++                             if Path(hook["command"]).resolve() == HOOK]
++                self.assertEqual(len(reminders), 1)
++                self.assertEqual(reminders[0]["type"], "command")
++                self.assertLessEqual(reminders[0]["timeout"], 5)
++                self.assertFalse(reminders[0].get("async", False))
++
++    def test_context_preserves_existing_rules_and_native_lifecycle(self):
++        prompt = (ROOT / "claudex-context.md").read_text()
++        for required in ("# Claudex Context Preservation",
++                         "Commands run, test results, and unresolved failures.",
++                         "Never call the deprecated `TaskOutput` tool.",
++                         "agent completion notification", "TaskList", "TaskGet",
++                         "TaskCreate", "TaskUpdate", "in_progress", "verification",
++                         "resume", "compaction", "restrictions"):
++            with self.subTest(required=required):
++                self.assertIn(required, prompt)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/runtime/tests/fixtures/bin/zellij b/runtime/tests/fixtures/bin/zellij
+new file mode 100755
+--- /dev/null
++++ b/runtime/tests/fixtures/bin/zellij
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++[[ "$*" == 'action list-panes --all --json' ]] || exit 2
++printf 'lookup\n' >>"${CLIPROXY_TEST_ZELLIJ_LOG:?}"
++case "${CLIPROXY_TEST_ZELLIJ_MODE:-ok}" in
++  fail) printf 'fixture metadata unavailable\n' >&2; exit 7 ;;
++  hang) exec sleep 30 ;;
++esac
++printf '%s\n' "${CLIPROXY_TEST_ZELLIJ_JSON:-[]}"
+diff --git a/runtime/tests/claudex-tab-resume.py b/runtime/tests/claudex-tab-resume.py
+new file mode 100644
+--- /dev/null
++++ b/runtime/tests/claudex-tab-resume.py
+@@ -0,0 +1,259 @@
++#!/usr/bin/env python3
++"""Exercise the real launcher with a fake terminal, Zellij, services and Claude."""
++
++import errno
++import json
++import os
++from pathlib import Path
++import pty
++import select
++import shutil
++import signal
++import subprocess
++import tempfile
++import time
++from types import SimpleNamespace
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++LAUNCHER = ROOT / "claude-codex"
++FIXTURES = ROOT / "tests/fixtures/bin"
++PROMPT = b"? [y/N] "
++
++
++def pane(name="own-tab", pane_id=7, plugin=False, focused=False):
++    return {"id": pane_id, "is_plugin": plugin, "tab_name": name,
++            "is_focused": focused}
++
++
++class TabResumeTests(unittest.TestCase):
++    def setUp(self):
++        (ROOT / "tmp").mkdir(exist_ok=True)
++        self.temp = tempfile.TemporaryDirectory(prefix="claudex-tab-test.", dir=ROOT / "tmp")
++        self.addCleanup(self.temp.cleanup)
++        self.work = Path(self.temp.name)
++        self.bin = self.work / "bin"
++        self.bin.mkdir()
++        # An allowlisted PATH prevents fallback to the real Claude/Zellij/services.
++        for command in ("bash", "dirname", "tr", "jq", "sed", "head", "tail",
++                        "mkdir", "mktemp", "date", "chmod", "mv", "unlink",
++                        "timeout", "sleep"):
++            executable = shutil.which(command, path="/usr/bin:/bin")
++            self.assertIsNotNone(executable, f"test dependency missing: {command}")
++            (self.bin / command).symlink_to(executable)
++        for command in ("claude", "curl", "systemctl", "tput", "zellij"):
++            (self.bin / command).symlink_to(FIXTURES / command)
++        config = self.work / "config.yaml"
++        config.write_text('api-keys:\n  - "fixture-only-not-a-credential"\n')
++        self.env = {
++            "PATH": str(self.bin), "HOME": str(self.work / "home"),
++            "CLAUDE_CONFIG_DIR": str(self.work / "claude"),
++            "CLIPROXY_CONFIG": str(config),
++            "CLAUDEX_GATEWAY_CACHE": str(self.work / "gateway-cache.json"),
++            "TERM": "xterm-256color", "LC_ALL": "C.UTF-8",
++            "ZELLIJ": "0", "ZELLIJ_PANE_ID": "7",
++            "CLIPROXY_TEST_ZELLIJ_JSON": json.dumps([
++                pane("focused-other-tab", 8, focused=True),
++                pane("plugin-collision", 7, plugin=True), pane(),
++            ]),
++        }
++        self.run_number = 0
++
++    def launch(self, args=(), *, expect_prompt=False, reply=b"y\n", env=None,
++               terminal=True, redirect=None, expected_lookups=None):
++        self.run_number += 1
++        prefix = self.work / str(self.run_number)
++        args_file = prefix.with_suffix(".args")
++        claude_log = prefix.with_suffix(".claude")
++        zellij_log = prefix.with_suffix(".zellij")
++        services_log = prefix.with_suffix(".services")
++        child_env = dict(self.env, **(env or {}))
++        child_env.update({
++            "CLIPROXY_TEST_CLAUDE_ARGS_FILE": str(args_file),
++            "CLIPROXY_TEST_CLAUDE_LOG": str(claude_log),
++            "CLIPROXY_TEST_ZELLIJ_LOG": str(zellij_log),
++            "CLIPROXY_TEST_SYSTEMCTL_LOG": str(services_log),
++        })
++        argv = [str(LAUNCHER), *args]
++        if terminal:
++            pid, fd = pty.fork()
++            if pid == 0:
++                try:
++                    os.chdir(self.work)
++                    if redirect is not None:
++                        replacement = os.open(os.devnull, os.O_RDWR)
++                        os.dup2(replacement, redirect)
++                        os.close(replacement)
++                    os.execve(str(LAUNCHER), argv, child_env)
++                except Exception:
++                    os._exit(126)
++            output = bytearray()
++            status = None
++            replied = False
++            deadline = time.monotonic() + 10
++            try:
++                while time.monotonic() < deadline:
++                    ready, _, _ = select.select([fd], [], [], 0.1)
++                    if ready:
++                        try:
++                            chunk = os.read(fd, 65536)
++                        except OSError as error:
++                            if error.errno != errno.EIO:
++                                raise
++                            break
++                        if not chunk:
++                            break
++                        output.extend(chunk)
++                        if PROMPT in output and not replied:
++                            self.assertFalse(services_log.exists(),
++                                             "services touched before resume answer")
++                            os.write(fd, reply)
++                            replied = True
++                    if status is None:
++                        finished, child_status = os.waitpid(pid, os.WNOHANG)
++                        if finished:
++                            status = child_status
++                    if status is not None and not ready:
++                        break
++                else:
++                    self.fail("launcher did not finish within the test deadline")
++                if status is None:
++                    _, status = os.waitpid(pid, 0)
++                returncode = os.waitstatus_to_exitcode(status)
++            finally:
++                os.close(fd)
++                if status is None:
++                    try:
++                        os.killpg(pid, signal.SIGKILL)
++                    except ProcessLookupError:
++                        pass
++                    os.waitpid(pid, 0)
++            output = bytes(output)
++        else:
++            result = subprocess.run(argv, input=b"", capture_output=True,
++                                    cwd=self.work, env=child_env, timeout=10, check=False)
++            output = result.stdout + result.stderr
++            returncode = result.returncode
++        self.assertEqual(output.count(PROMPT), int(expect_prompt), output.decode(errors="replace"))
++        actual_args = ([arg.decode() for arg in args_file.read_bytes().split(b"\0")[:-1]]
++                       if args_file.exists() else [])
++        lookups = len(zellij_log.read_text().splitlines()) if zellij_log.exists() else 0
++        calls = len(claude_log.read_text().splitlines()) if claude_log.exists() else 0
++        if expected_lookups is not None:
++            self.assertEqual(lookups, expected_lookups)
++        return SimpleNamespace(returncode=returncode, output=output, args=actual_args,
++                               lookups=lookups, calls=calls)
++
++    def assert_launch(self, result, resume=None, returncode=0):
++        self.assertEqual(result.returncode, returncode, result.output.decode(errors="replace"))
++        self.assertEqual(result.calls, 1)
++        selectors = []
++        for index, argument in enumerate(result.args):
++            if argument.startswith("--resume="):
++                selectors.append(argument.partition("=")[2])
++            elif argument == "--resume":
++                selectors.append(result.args[index + 1])
++        self.assertEqual(selectors, [] if resume is None else [resume])
++        self.assertEqual(result.args.count("--autocompact"), 1)
++        self.assertEqual(result.args.count("900000"), 1)
++
++    def test_yes_resumes_own_pane_not_focus_or_plugin(self):
++        for reply in (b"y\n", b"Y\n", b"yes\n", b"YES\n"):
++            with self.subTest(reply=reply):
++                result = self.launch(expect_prompt=True, reply=reply, expected_lookups=1)
++                self.assertIn(b"Resume session 'own-tab'", result.output)
++                self.assert_launch(result, resume="own-tab")
++
++    def test_no_empty_unrecognized_and_eof_launch_normally(self):
++        for reply in (b"n\n", b"\n", b"no\n", b"maybe\n", b"\x04"):
++            with self.subTest(reply=reply):
++                self.assert_launch(self.launch(expect_prompt=True, reply=reply, expected_lookups=1))
++
++    def test_ctrl_c_cancels_without_starting_services_or_claude(self):
++        result = self.launch(expect_prompt=True, reply=b"\x03", expected_lookups=1)
++        self.assertIn(result.returncode, (-signal.SIGINT, 130))
++        self.assertEqual(result.calls, 0)
++        self.assertEqual(result.args, [])
++        self.assertFalse(list(self.work.glob("*.services")))
++
++    def test_explicit_arguments_never_lookup_or_prompt(self):
++        for args in (("--resume", "chosen session"), ("--resume=chosen session",),
++                     ("-r", "chosen session"), ("-r=chosen session",),
++                     ("--resume",), ("--continue",), ("-c",), ("--help",),
++                     ("--version",), ("-p", "fixture prompt"), ("a prompt",),
++                     ("--model", "claude-gateway-gpt-5-6-sol"),
++                     ("--autocompact", "500000"), ("--",), ("",)):
++            with self.subTest(args=args):
++                result = self.launch(args, expected_lookups=0)
++                self.assertEqual(result.returncode, 0)
++                self.assertEqual(result.calls, 1)
++                self.assertEqual(result.args[-len(args):], list(args))
++
++    def test_outside_zellij_or_invalid_pane_id_skips_lookup(self):
++        for env in ({"ZELLIJ": ""}, {"ZELLIJ_PANE_ID": ""},
++                    {"ZELLIJ_PANE_ID": "terminal_7"}, {"ZELLIJ_PANE_ID": "-1"},
++                    {"ZELLIJ_PANE_ID": "7; printf bad"}):
++            with self.subTest(env=env):
++                self.assert_launch(self.launch(env=env, expected_lookups=0))
++
++    def test_noninteractive_or_redirected_streams_skip_lookup(self):
++        self.assert_launch(self.launch(terminal=False, expected_lookups=0))
++        for redirect in (0, 1, 2):
++            with self.subTest(redirect=redirect):
++                self.assert_launch(self.launch(redirect=redirect, expected_lookups=0))
++
++    def test_missing_zellij_skips_lookup(self):
++        (self.bin / "zellij").unlink()
++        self.assert_launch(self.launch(expected_lookups=0))
++
++    def test_missing_timeout_skips_optional_lookup(self):
++        (self.bin / "timeout").unlink()
++        self.assert_launch(self.launch(expected_lookups=0))
++
++    def test_failed_or_hung_lookup_does_not_block_launch(self):
++        for mode in ("fail", "hang"):
++            with self.subTest(mode=mode):
++                self.assert_launch(self.launch(env={"CLIPROXY_TEST_ZELLIJ_MODE": mode},
++                                               expected_lookups=1))
++
++    def test_malformed_unknown_or_ambiguous_metadata_skips_prompt(self):
++        payloads = ("{broken", "null", "{}", "[]", "[]\n[]",
++                    json.dumps([pane(pane_id=8)]), json.dumps([pane(plugin=True)]),
++                    json.dumps([pane(), pane()]), json.dumps([pane(), pane("other")]),
++                    json.dumps([pane(name=None)]), json.dumps([pane(name=123)]),
++                    json.dumps([pane(name="")]), json.dumps([pane(name="   ")]),
++                    json.dumps([{"id": 7, "tab_name": "missing-plugin-type"}]))
++        for payload in payloads:
++            with self.subTest(payload=payload):
++                self.assert_launch(self.launch(env={"CLIPROXY_TEST_ZELLIJ_JSON": payload},
++                                               expected_lookups=1))
++
++    def test_names_remain_literal_single_values(self):
++        names = ("two words", "Māori-日本語", "  exact spaces  ", "tab'\"name",
++                 "tab;$(touch NOT_EXECUTED)`touch ALSO_NOT_EXECUTED`",
++                 "--model=opus", "100%*[literal]?", "back\\slash")
++        for name in names:
++            with self.subTest(name=name):
++                result = self.launch(expect_prompt=True, expected_lookups=1,
++                                     env={"CLIPROXY_TEST_ZELLIJ_JSON": json.dumps([pane(name)])})
++                self.assert_launch(result, resume=name)
++                # Equals form also keeps a leading dash from becoming another option.
++                self.assertIn("--resume=" + name, result.args)
++                self.assertNotIn("--model", result.args)
++        self.assertFalse((self.work / "NOT_EXECUTED").exists())
++        self.assertFalse((self.work / "ALSO_NOT_EXECUTED").exists())
++
++    def test_control_characters_are_rejected_before_shell_capture(self):
++        for control in ("\n", "\r", "\t", "\x00", "\x1b", "\x7f", "\x85", chr(0x2028), chr(0x202E)):
++            with self.subTest(control=repr(control)):
++                self.assert_launch(self.launch(expected_lookups=1, env={
++                    "CLIPROXY_TEST_ZELLIJ_JSON": json.dumps([pane("tab" + control)])}))
++
++    def test_failed_native_resume_is_not_retried_as_fresh(self):
++        result = self.launch(expect_prompt=True, expected_lookups=1,
++                             env={"CLIPROXY_TEST_CLAUDE_EXIT": "37"})
++        self.assert_launch(result, resume="own-tab", returncode=37)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

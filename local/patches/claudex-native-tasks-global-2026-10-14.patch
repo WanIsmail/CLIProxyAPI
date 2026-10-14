@@ -1,0 +1,39 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -20,6 +20,35 @@
+ `2026-09-17 11:02:45 AM`. Purpose: when the user is away for long periods, they
+ can see when the last task/request was completed.
+ 
++## Claudex Native Tasks — Mandatory
++
++When working through Claudex, maintain Claude Code's actual native task list for
++every work request; a Markdown checklist is not a substitute. Before substantive
++work, inspect existing tasks with `TaskList`/`TaskGet` and create missing work
++with `TaskCreate`. Use `TaskUpdate` throughout the work: current work is
++`in_progress`, pending work and blockers stay accurate, and `completed` requires
++verification. Refresh and display the full list after updates and before handing
++back. On resume or compaction, reconcile and continue existing task IDs rather
++than duplicating them; preserve IDs, statuses, blockers, and next actions.
++
++Respect explicit tool restrictions. If native tools are unavailable, disclose
++that and label any temporary text checklist as a fallback, never as a native
++update. Do not directly edit task storage, force unrelated sessions into one
++list, broaden permissions, or create files/commits solely for task tracking.
++
++## Claudex Launch Preferences
++
++- Default native auto-compaction: `--autocompact 900000`. Explicit split or
++  equals-form overrides, including `auto`, take precedence. Do not compact or
++  restart an already-running session merely to apply this preference.
++- Session names set with `/rename` usually match their Zellij tab names. A bare
++  interactive `claudex` launch should offer to resume the session matching the
++  calling pane's tab, not whichever tab is globally focused. Ask `[y/N]`; no,
++  empty input, or EOF keeps ordinary launch behavior.
++- Any explicit arguments bypass that suggestion, especially
++  `claudex --resume <my-session>`. Preserve the chosen session exactly. Do not
++  auto-rename sessions or silently replace a failed resume with a new session.
++
+ ## Claude Runtime Notes
+ 
+ - Claude Code reads `CLAUDE.md` and `AGENTS.md` when present.
