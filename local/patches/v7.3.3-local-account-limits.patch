@@ -1,0 +1,1638 @@
+diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
+index 447f280c..49a215ca 100644
+--- a/internal/api/server_middleware.go
++++ b/internal/api/server_middleware.go
+@@ -45,7 +45,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
+ 		}
+ 		if c != nil && c.Request != nil {
+ 			path := c.Request.URL.Path
+-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
++			if isLocalOnlyPath(path) || strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
+ 				c.Next()
+ 				return
+ 			}
+@@ -124,13 +124,22 @@ func isExampleAPIKeySafeModeProxyPath(path string) bool {
+ 	}
+ }
+ 
++func isLocalOnlyPath(path string) bool {
++	return path == "/v0/local" || strings.HasPrefix(path, "/v0/local/")
++}
++
+ // corsMiddleware returns a Gin middleware handler that adds CORS headers
+-// to every response, allowing cross-origin requests.
++// to browser-accessible responses while leaving local-only routes isolated.
+ //
+ // Returns:
+ //   - gin.HandlerFunc: The CORS middleware handler
+ func corsMiddleware() gin.HandlerFunc {
+ 	return func(c *gin.Context) {
++		if isLocalOnlyPath(c.Request.URL.Path) {
++			c.Next()
++			return
++		}
++
+ 		c.Header("Access-Control-Allow-Origin", "*")
+ 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+ 		c.Header("Access-Control-Allow-Headers", "*")
+diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
+index 1827bd53..39b99993 100644
+--- a/internal/api/server_routes.go
++++ b/internal/api/server_routes.go
+@@ -13,6 +13,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/gin-gonic/gin"
++	localHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/local"
+ 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
+ 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
+ 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
+@@ -51,6 +52,14 @@ func (s *Server) setupRoutes() {
+ 	s.engine.GET("/healthz", healthzHandler)
+ 	s.engine.HEAD("/healthz", healthzHandler)
+ 
++	localHandler := localHandlers.NewHandler(s.handlers.AuthManager)
++	localGroup := s.engine.Group("/v0/local")
++	localGroup.Use(localHandlers.LocalOnly())
++	localGroup.GET("/codex/account-limits", localHandler.GetCodexAccountLimits)
++	localGroup.GET("/codex/account-limits/", func(c *gin.Context) {
++		c.AbortWithStatus(http.StatusNotFound)
++	})
++
+ 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+ 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
+ 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
+diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
+index 95083201..e3510454 100644
+--- a/internal/runtime/executor/helps/utls_client.go
++++ b/internal/runtime/executor/helps/utls_client.go
+@@ -29,6 +29,21 @@ type utlsRoundTripper struct {
+ 	dialer proxy.Dialer
+ }
+ 
++type failedContextDialer struct {
++	err error
++}
++
++func (d *failedContextDialer) Dial(_, _ string) (net.Conn, error) {
++	return nil, d.err
++}
++
++func (d *failedContextDialer) DialContext(
++	_ context.Context,
++	_, _ string,
++) (net.Conn, error) {
++	return nil, d.err
++}
++
+ type closeConnectionBody struct {
+ 	io.ReadCloser
+ 	closeConnection func() error
+@@ -60,6 +75,9 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+ 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+ 		if errBuild != nil {
+ 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
++			dialer = &failedContextDialer{
++				err: fmt.Errorf("utls: configure explicit proxy: %w", errBuild),
++			}
+ 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
+ 			dialer = proxyDialer
+ 		}
+@@ -352,6 +370,26 @@ type fallbackRoundTripper struct {
+ 	fallback  http.RoundTripper
+ }
+ 
++type redirectsDisabledContextKey struct{}
++
++// WithRedirectsDisabled marks outbound requests that must return redirects
++// without following them.
++func WithRedirectsDisabled(ctx context.Context) context.Context {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return context.WithValue(ctx, redirectsDisabledContextKey{}, true)
++}
++
++// RedirectsDisabled reports whether an outbound request must not follow redirects.
++func RedirectsDisabled(ctx context.Context) bool {
++	if ctx == nil {
++		return false
++	}
++	disabled, _ := ctx.Value(redirectsDisabledContextKey{}).(bool)
++	return disabled
++}
++
+ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+ 	if IsAnthropicUpstreamURL(req.URL) {
+ 		return f.anthropic.RoundTrip(req)
+@@ -400,6 +438,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+ 			fallback:  standardTransport,
+ 		},
+ 	}
++	if RedirectsDisabled(ctx) {
++		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
++			return http.ErrUseLastResponse
++		}
++	}
+ 	if timeout > 0 {
+ 		client.Timeout = timeout
+ 	}
+diff --git a/internal/runtime/executor/helps/utls_client_test.go b/internal/runtime/executor/helps/utls_client_test.go
+index f4492adc..16680ef0 100644
+--- a/internal/runtime/executor/helps/utls_client_test.go
++++ b/internal/runtime/executor/helps/utls_client_test.go
+@@ -21,6 +21,7 @@ import (
+ 
+ 	tls "github.com/refraction-networking/utls"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"golang.org/x/net/proxy"
+ )
+ 
+ type utlsClientRoundTripFunc func(*http.Request) (*http.Response, error)
+@@ -433,6 +434,50 @@ func TestFallbackRoundTripperSelectsProviderFingerprint(t *testing.T) {
+ 	}
+ }
+ 
++func TestUtlsRoundTripperRejectsInvalidExplicitProxy(t *testing.T) {
++	roundTripper := newUtlsRoundTripper("not-a-proxy")
++	if roundTripper.dialer == proxy.Direct {
++		t.Fatal("invalid explicit proxy silently selected direct network access")
++	}
++}
++
++func TestNewUtlsHTTPClientCanDisableRedirectsFromContext(t *testing.T) {
++	calls := 0
++	roundTripper := utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
++		calls++
++		response := &http.Response{
++			Header:  make(http.Header),
++			Body:    io.NopCloser(strings.NewReader("{}")),
++			Request: req,
++		}
++		if calls == 1 {
++			response.StatusCode = http.StatusFound
++			response.Header.Set("Location", "https://example.net/final")
++		} else {
++			response.StatusCode = http.StatusOK
++		}
++		return response, nil
++	})
++	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripper)
++	ctx = WithRedirectsDisabled(ctx)
++	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/start", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	response, err := NewUtlsHTTPClient(ctx, nil, nil, 0).Do(request)
++	if err != nil {
++		t.Fatalf("client.Do returned error: %v", err)
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusFound {
++		t.Fatalf("status = %d, want redirect response", response.StatusCode)
++	}
++	if calls != 1 {
++		t.Fatalf("round trips = %d, want 1 with redirects disabled", calls)
++	}
++}
++
+ func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) {
+ 	t.Parallel()
+ 
+diff --git a/internal/api/codex_account_limits_route_test.go b/internal/api/codex_account_limits_route_test.go
+new file mode 100644
+index 00000000..612c16d3
+--- /dev/null
++++ b/internal/api/codex_account_limits_route_test.go
+@@ -0,0 +1,243 @@
++package api
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
++)
++
++func TestCodexAccountLimitsRouteAvailableWithoutManagementSecret(t *testing.T) {
++	server := newTestServer(t)
++
++	for _, host := range []string{
++		"localhost",
++		"localhost:8317",
++		"127.0.0.1",
++		"127.0.0.1:8317",
++		"::1",
++		"[::1]",
++		"[::1]:8317",
++	} {
++		t.Run(host, func(t *testing.T) {
++			req := httptest.NewRequest(http.MethodGet, "/v0/local/codex/account-limits", nil)
++			req.RemoteAddr = "127.0.0.1:4321"
++			req.Host = host
++			rr := httptest.NewRecorder()
++			server.engine.ServeHTTP(rr, req)
++
++			if rr.Code != http.StatusServiceUnavailable {
++				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
++			}
++			if !strings.Contains(rr.Body.String(), `"error":"codex_account_unavailable"`) {
++				t.Fatalf("body = %q, want sanitized unavailable error", rr.Body.String())
++			}
++			if origin := rr.Header().Get("Access-Control-Allow-Origin"); origin != "" {
++				t.Fatalf("Access-Control-Allow-Origin = %q, want no browser access", origin)
++			}
++		})
++	}
++}
++
++func TestCodexAccountLimitsRouteRejectsBrowserAndNonlocalHost(t *testing.T) {
++	server := newTestServer(t)
++
++	for _, test := range []struct {
++		name   string
++		method string
++		host   string
++		origin string
++	}{
++		{
++			name:   "cross-origin browser",
++			method: http.MethodGet,
++			host:   "127.0.0.1:8317",
++			origin: "https://attacker.example",
++		},
++		{
++			name:   "nonlocal host",
++			method: http.MethodGet,
++			host:   "attacker.example:8317",
++		},
++		{
++			name:   "bracketed localhost host",
++			method: http.MethodGet,
++			host:   "[localhost]",
++		},
++		{
++			name:   "bracketed localhost host with port",
++			method: http.MethodGet,
++			host:   "[localhost]:8317",
++		},
++		{
++			name:   "bracketed IPv4 host",
++			method: http.MethodGet,
++			host:   "[127.0.0.1]",
++		},
++		{
++			name:   "bracketed IPv4 host with port",
++			method: http.MethodGet,
++			host:   "[127.0.0.1]:8317",
++		},
++		{
++			name:   "signed host port",
++			method: http.MethodGet,
++			host:   "localhost:+8317",
++		},
++		{
++			name:   "out-of-range host port",
++			method: http.MethodGet,
++			host:   "localhost:65536",
++		},
++		{
++			name:   "out-of-range IPv6 host port",
++			method: http.MethodGet,
++			host:   "[::1]:65536",
++		},
++		{
++			name:   "alternate IPv4 loopback host",
++			method: http.MethodGet,
++			host:   "127.0.0.2:8317",
++		},
++		{
++			name:   "mapped IPv4 loopback host",
++			method: http.MethodGet,
++			host:   "[::ffff:127.0.0.1]:8317",
++		},
++		{
++			name:   "zone-qualified IPv6 host",
++			method: http.MethodGet,
++			host:   "[::1%lo]:8317",
++		},
++		{
++			name:   "browser preflight",
++			method: http.MethodOptions,
++			host:   "127.0.0.1:8317",
++			origin: "https://attacker.example",
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			req := httptest.NewRequest(test.method, "/v0/local/codex/account-limits", nil)
++			req.RemoteAddr = "127.0.0.1:4321"
++			req.Host = test.host
++			if test.origin != "" {
++				req.Header.Set("Origin", test.origin)
++			}
++			rr := httptest.NewRecorder()
++			server.engine.ServeHTTP(rr, req)
++
++			if rr.Code != http.StatusNotFound {
++				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
++			}
++			if origin := rr.Header().Get("Access-Control-Allow-Origin"); origin != "" {
++				t.Fatalf("Access-Control-Allow-Origin = %q, want no browser access", origin)
++			}
++		})
++	}
++}
++
++func TestCodexAccountLimitsTrailingSlashRejectsBeforeRedirect(t *testing.T) {
++	server := newTestServer(t)
++
++	for _, test := range []struct {
++		name       string
++		remoteAddr string
++		host       string
++		origin     string
++	}{
++		{
++			name:       "nonlocal host",
++			remoteAddr: "127.0.0.1:4321",
++			host:       "attacker.example:8317",
++		},
++		{
++			name:       "browser origin",
++			remoteAddr: "127.0.0.1:4321",
++			host:       "127.0.0.1:8317",
++			origin:     "https://attacker.example",
++		},
++		{
++			name:       "remote peer",
++			remoteAddr: "192.0.2.10:4321",
++			host:       "127.0.0.1:8317",
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			req := httptest.NewRequest(http.MethodGet, "/v0/local/codex/account-limits/", nil)
++			req.RemoteAddr = test.remoteAddr
++			req.Host = test.host
++			if test.origin != "" {
++				req.Header.Set("Origin", test.origin)
++			}
++			rr := httptest.NewRecorder()
++			server.engine.ServeHTTP(rr, req)
++
++			if rr.Code != http.StatusNotFound {
++				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
++			}
++			if location := rr.Header().Get("Location"); location != "" {
++				t.Fatalf("Location = %q, want no route disclosure", location)
++			}
++			if origin := rr.Header().Get("Access-Control-Allow-Origin"); origin != "" {
++				t.Fatalf("Access-Control-Allow-Origin = %q, want no browser access", origin)
++			}
++		})
++	}
++}
++
++func TestCodexAccountLimitsRouteBoundaryPrecedesHomeHeartbeat(t *testing.T) {
++	previousHome := home.Current()
++	home.ClearCurrent()
++	t.Cleanup(func() { home.SetCurrent(previousHome) })
++
++	server := newTestServer(t)
++	server.cfg.Home.Enabled = true
++
++	for _, test := range []struct {
++		name       string
++		method     string
++		remoteAddr string
++		host       string
++		origin     string
++	}{
++		{
++			name:       "nonlocal host",
++			method:     http.MethodGet,
++			remoteAddr: "127.0.0.1:4321",
++			host:       "attacker.example:8317",
++		},
++		{
++			name:       "browser preflight",
++			method:     http.MethodOptions,
++			remoteAddr: "127.0.0.1:4321",
++			host:       "127.0.0.1:8317",
++			origin:     "https://attacker.example",
++		},
++		{
++			name:       "remote peer",
++			method:     http.MethodGet,
++			remoteAddr: "192.0.2.10:4321",
++			host:       "127.0.0.1:8317",
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			req := httptest.NewRequest(test.method, "/v0/local/codex/account-limits", nil)
++			req.RemoteAddr = test.remoteAddr
++			req.Host = test.host
++			if test.origin != "" {
++				req.Header.Set("Origin", test.origin)
++			}
++			rr := httptest.NewRecorder()
++			server.engine.ServeHTTP(rr, req)
++
++			if rr.Code != http.StatusNotFound {
++				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
++			}
++			if origin := rr.Header().Get("Access-Control-Allow-Origin"); origin != "" {
++				t.Fatalf("Access-Control-Allow-Origin = %q, want no browser access", origin)
++			}
++		})
++	}
++}
+diff --git a/internal/api/handlers/local/codex_account_limits.go b/internal/api/handlers/local/codex_account_limits.go
+new file mode 100644
+index 00000000..ec3d1a95
+--- /dev/null
++++ b/internal/api/handlers/local/codex_account_limits.go
+@@ -0,0 +1,371 @@
++package local
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"math"
++	"net"
++	"net/http"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	log "github.com/sirupsen/logrus"
++)
++
++const (
++	codexAccountUnavailable         = "codex_account_unavailable"
++	codexAccountAmbiguous           = "codex_account_ambiguous"
++	codexAccountUsageUnavailable    = "codex_account_usage_unavailable"
++	codexAccountUsageTimeout        = "codex_account_usage_timeout"
++	codexAccountMalformed           = "codex_account_usage_malformed"
++	codexAccountResponseTooLarge    = "codex_account_usage_too_large"
++	codexAccountUsageURL            = "https://chatgpt.com/backend-api/wham/usage"
++	codexAccountClientIdentity      = "codex_cli_rs"
++	maxCodexUsageResponseBodySize   = 64 * 1024
++	codexAccountUsageRequestTimeout = 4 * time.Second
++)
++
++type authManager interface {
++	List() []*auth.Auth
++	NewHttpRequest(
++		context.Context,
++		*auth.Auth,
++		string,
++		string,
++		[]byte,
++		http.Header,
++	) (*http.Request, error)
++	HttpRequest(
++		context.Context,
++		*auth.Auth,
++		*http.Request,
++	) (*http.Response, error)
++}
++
++type accountLimitsResponse struct {
++	SchemaVersion int                  `json:"schema_version"`
++	Windows       []accountLimitWindow `json:"windows"`
++}
++
++type accountLimitWindow struct {
++	WindowMinutes int     `json:"window_minutes"`
++	UsedPercent   float64 `json:"used_percent"`
++	ResetsAt      int64   `json:"resets_at,omitempty"`
++}
++
++type upstreamUsageResponse struct {
++	RateLimit *struct {
++		PrimaryWindow   upstreamLimitWindow `json:"primary_window"`
++		SecondaryWindow upstreamLimitWindow `json:"secondary_window"`
++	} `json:"rate_limit"`
++}
++
++type upstreamLimitWindow struct {
++	LimitWindowSeconds json.RawMessage `json:"limit_window_seconds"`
++	UsedPercent        json.RawMessage `json:"used_percent"`
++	ResetsAt           json.RawMessage `json:"reset_at"`
++}
++
++// Handler serves credential-isolated local account metadata.
++type Handler struct {
++	authManager authManager
++}
++
++// NewHandler creates a local account handler backed by the runtime auth manager.
++func NewHandler(manager *auth.Manager) *Handler {
++	return &Handler{authManager: manager}
++}
++
++func isLoopbackAddress(rawAddress string) bool {
++	host, _, err := net.SplitHostPort(strings.TrimSpace(rawAddress))
++	if err != nil {
++		return false
++	}
++	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
++		host = host[:zone]
++	}
++	ip := net.ParseIP(host)
++	return ip != nil && ip.IsLoopback()
++}
++
++func isValidHostPort(port string) bool {
++	if port == "" {
++		return false
++	}
++	for _, digit := range port {
++		if digit < '0' || digit > '9' {
++			return false
++		}
++	}
++	value, err := strconv.ParseUint(port, 10, 16)
++	return err == nil && value > 0
++}
++
++func normalizeLocalHost(rawHost string) (string, bool) {
++	host := strings.TrimSpace(rawHost)
++	if host == "" {
++		return "", false
++	}
++
++	if strings.HasPrefix(host, "[") {
++		if strings.HasSuffix(host, "]") {
++			bracketedHost := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
++			return bracketedHost, bracketedHost == "::1"
++		}
++		parsedHost, port, err := net.SplitHostPort(host)
++		if err != nil || parsedHost != "::1" || !isValidHostPort(port) {
++			return "", false
++		}
++		return parsedHost, true
++	}
++	if strings.Count(host, ":") == 1 {
++		parsedHost, port, err := net.SplitHostPort(host)
++		if err != nil || !isValidHostPort(port) {
++			return "", false
++		}
++		return parsedHost, true
++	}
++	return host, true
++}
++
++func isLoopbackHost(rawHost string) bool {
++	host, ok := normalizeLocalHost(rawHost)
++	return ok && (strings.EqualFold(host, "localhost") ||
++		host == "127.0.0.1" || host == "::1")
++}
++
++// LocalOnly rejects browser-originated and nonlocal-host requests in addition
++// to enforcing a direct loopback peer.
++func LocalOnly() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if !isLoopbackAddress(c.Request.RemoteAddr) ||
++			!isLoopbackHost(c.Request.Host) ||
++			strings.TrimSpace(c.GetHeader("Origin")) != "" {
++			c.AbortWithStatus(http.StatusNotFound)
++			return
++		}
++		c.Next()
++	}
++}
++
++// GetCodexAccountLimits returns a normalized Codex account limits snapshot.
++func (h *Handler) GetCodexAccountLimits(c *gin.Context) {
++	selected, ambiguous := h.selectCodexAccount()
++	if ambiguous {
++		c.JSON(http.StatusConflict, gin.H{"error": codexAccountAmbiguous})
++		return
++	}
++	if selected == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": codexAccountUnavailable})
++		return
++	}
++
++	accountID, _ := selected.Metadata["account_id"].(string)
++	accountID = strings.TrimSpace(accountID)
++	if accountID == "" {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": codexAccountUnavailable})
++		return
++	}
++
++	headers := make(http.Header)
++	headers.Set("Accept", "application/json")
++	headers.Set("Chatgpt-Account-Id", accountID)
++	headers.Set("Originator", codexAccountClientIdentity)
++	headers.Set("User-Agent", codexAccountClientIdentity)
++	requestContext, cancel := context.WithTimeout(
++		c.Request.Context(),
++		codexAccountUsageRequestTimeout,
++	)
++	defer cancel()
++	outboundContext := helps.WithRedirectsDisabled(requestContext)
++	request, err := h.authManager.NewHttpRequest(
++		outboundContext,
++		selected,
++		http.MethodGet,
++		codexAccountUsageURL,
++		nil,
++		headers,
++	)
++	if err != nil {
++		writeAccountUsageFailure(c, err)
++		return
++	}
++
++	response, err := h.authManager.HttpRequest(
++		outboundContext,
++		selected,
++		request,
++	)
++	if err != nil {
++		writeAccountUsageFailure(c, err)
++		return
++	}
++	if response == nil || response.Body == nil {
++		c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountUsageUnavailable})
++		return
++	}
++	defer closeAccountUsageBody(response.Body)
++	if response.StatusCode != http.StatusOK {
++		c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountUsageUnavailable})
++		return
++	}
++
++	body, err := io.ReadAll(io.LimitReader(
++		response.Body,
++		maxCodexUsageResponseBodySize+1,
++	))
++	if err != nil {
++		writeAccountUsageFailure(c, err)
++		return
++	}
++	if len(body) > maxCodexUsageResponseBodySize {
++		c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountResponseTooLarge})
++		return
++	}
++	var upstream upstreamUsageResponse
++	if err := json.Unmarshal(body, &upstream); err != nil || upstream.RateLimit == nil {
++		c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountMalformed})
++		return
++	}
++
++	windows := make([]accountLimitWindow, 0, 2)
++	seenDurations := make(map[int]struct{}, 2)
++	canonicalWindows := 0
++	for _, window := range []upstreamLimitWindow{
++		upstream.RateLimit.PrimaryWindow,
++		upstream.RateLimit.SecondaryWindow,
++	} {
++		minutes, canonical := canonicalWindowMinutes(window.LimitWindowSeconds)
++		if canonical {
++			canonicalWindows++
++			if _, duplicate := seenDurations[minutes]; duplicate {
++				c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountMalformed})
++				return
++			}
++			seenDurations[minutes] = struct{}{}
++		}
++		if normalized, ok := normalizeAccountLimitWindow(window); ok {
++			windows = append(windows, normalized)
++		}
++	}
++	if canonicalWindows > 0 && len(windows) == 0 {
++		c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountMalformed})
++		return
++	}
++	sort.Slice(windows, func(i, j int) bool {
++		return windows[i].WindowMinutes < windows[j].WindowMinutes
++	})
++	c.JSON(http.StatusOK, accountLimitsResponse{
++		SchemaVersion: 1,
++		Windows:       windows,
++	})
++}
++
++func closeAccountUsageBody(body io.Closer) {
++	if err := body.Close(); err != nil {
++		log.Warn("codex account usage response body close failed")
++	}
++}
++
++func writeAccountUsageFailure(c *gin.Context, err error) {
++	if errors.Is(err, context.DeadlineExceeded) {
++		c.JSON(http.StatusGatewayTimeout, gin.H{"error": codexAccountUsageTimeout})
++		return
++	}
++	c.JSON(http.StatusBadGateway, gin.H{"error": codexAccountUsageUnavailable})
++}
++
++func (h *Handler) selectCodexAccount() (*auth.Auth, bool) {
++	if h == nil || h.authManager == nil {
++		return nil, false
++	}
++	var selected *auth.Auth
++	for _, candidate := range h.authManager.List() {
++		if candidate == nil || candidate.Disabled || !eligibleForCodexUsage(candidate) {
++			continue
++		}
++		if !strings.EqualFold(strings.TrimSpace(candidate.Provider), "codex") ||
++			candidate.AuthKind() != auth.AuthKindOAuth {
++			continue
++		}
++		if selected != nil {
++			return nil, true
++		}
++		selected = candidate
++	}
++	return selected, false
++}
++
++func eligibleForCodexUsage(candidate *auth.Auth) bool {
++	if candidate.Status == auth.StatusActive {
++		return true
++	}
++	return candidate.Status == auth.StatusError &&
++		candidate.Quota.Exceeded &&
++		strings.EqualFold(strings.TrimSpace(candidate.Quota.Reason), "quota")
++}
++
++func canonicalWindowMinutes(raw json.RawMessage) (int, bool) {
++	var seconds int64
++	if len(raw) == 0 || json.Unmarshal(raw, &seconds) != nil {
++		return 0, false
++	}
++	switch seconds {
++	case 18_000:
++		return 300, true
++	case 604_800:
++		return 10_080, true
++	default:
++		return 0, false
++	}
++}
++
++func parseUsedPercent(raw json.RawMessage) (float64, bool) {
++	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++		return 0, false
++	}
++	var usedPercent float64
++	if err := json.Unmarshal(raw, &usedPercent); err != nil ||
++		math.IsNaN(usedPercent) || math.IsInf(usedPercent, 0) ||
++		usedPercent < 0 || usedPercent > 100 {
++		return 0, false
++	}
++	return usedPercent, true
++}
++
++func parseResetTimestamp(raw json.RawMessage) int64 {
++	if len(raw) == 0 {
++		return 0
++	}
++	var resetsAt int64
++	if err := json.Unmarshal(raw, &resetsAt); err != nil ||
++		resetsAt < 1_000_000_000 || resetsAt > 9_999_999_999 {
++		return 0
++	}
++	return resetsAt
++}
++
++func normalizeAccountLimitWindow(window upstreamLimitWindow) (accountLimitWindow, bool) {
++	usedPercent, validUtilization := parseUsedPercent(window.UsedPercent)
++	if !validUtilization {
++		return accountLimitWindow{}, false
++	}
++	minutes, canonical := canonicalWindowMinutes(window.LimitWindowSeconds)
++	if !canonical {
++		return accountLimitWindow{}, false
++	}
++	resetsAt := parseResetTimestamp(window.ResetsAt)
++	return accountLimitWindow{
++		WindowMinutes: minutes,
++		UsedPercent:   usedPercent,
++		ResetsAt:      resetsAt,
++	}, true
++}
+diff --git a/internal/api/handlers/local/codex_account_limits_test.go b/internal/api/handlers/local/codex_account_limits_test.go
+new file mode 100644
+index 00000000..c35b13dc
+--- /dev/null
++++ b/internal/api/handlers/local/codex_account_limits_test.go
+@@ -0,0 +1,804 @@
++package local
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++)
++
++type fakeAuthManager struct {
++	auths                        []*auth.Auth
++	response                     *http.Response
++	requestErr                   error
++	httpErr                      error
++	selectedAuth                 *auth.Auth
++	requestMethod                string
++	requestURL                   string
++	requestHeaders               http.Header
++	newRequestRedirectsDisabled  bool
++	httpRequestRedirectsDisabled bool
++	newRequestHasDeadline        bool
++	httpRequestHasDeadline       bool
++	requireDeadline              bool
++}
++
++func (f *fakeAuthManager) List() []*auth.Auth {
++	return f.auths
++}
++
++func (f *fakeAuthManager) NewHttpRequest(
++	ctx context.Context,
++	selected *auth.Auth,
++	method string,
++	targetURL string,
++	body []byte,
++	headers http.Header,
++) (*http.Request, error) {
++	f.selectedAuth = selected
++	f.requestMethod = method
++	f.requestURL = targetURL
++	f.requestHeaders = headers.Clone()
++	f.newRequestRedirectsDisabled = helps.RedirectsDisabled(ctx)
++	_, f.newRequestHasDeadline = ctx.Deadline()
++	if f.requestErr != nil {
++		return nil, f.requestErr
++	}
++	return http.NewRequestWithContext(ctx, method, targetURL, nil)
++}
++
++func (f *fakeAuthManager) HttpRequest(
++	ctx context.Context,
++	_ *auth.Auth,
++	_ *http.Request,
++) (*http.Response, error) {
++	f.httpRequestRedirectsDisabled = helps.RedirectsDisabled(ctx)
++	_, f.httpRequestHasDeadline = ctx.Deadline()
++	if f.httpErr != nil {
++		return nil, f.httpErr
++	}
++	if f.requireDeadline {
++		if !f.httpRequestHasDeadline {
++			return nil, errors.New("synthetic missing deadline")
++		}
++		return nil, context.DeadlineExceeded
++	}
++	return f.response, nil
++}
++
++func activeCodexAuth(id string, accountID string) *auth.Auth {
++	return &auth.Auth{
++		ID:       id,
++		Provider: "codex",
++		Status:   auth.StatusActive,
++		Attributes: map[string]string{
++			auth.AttributeAuthKind: auth.AuthKindOAuth,
++		},
++		Metadata: map[string]any{"account_id": accountID},
++	}
++}
++
++func jsonResponse(status int, body string) *http.Response {
++	return &http.Response{
++		StatusCode: status,
++		Body:       io.NopCloser(strings.NewReader(body)),
++	}
++}
++
++func serveAccountLimits(manager authManager) *httptest.ResponseRecorder {
++	handler := &Handler{authManager: manager}
++	router := gin.New()
++	router.GET("/limits", handler.GetCodexAccountLimits)
++	req := httptest.NewRequest(http.MethodGet, "/limits", nil)
++	rr := httptest.NewRecorder()
++	router.ServeHTTP(rr, req)
++	return rr
++}
++
++func decodeLimitsResponse(t *testing.T, rr *httptest.ResponseRecorder) accountLimitsResponse {
++	t.Helper()
++	var body accountLimitsResponse
++	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
++		t.Fatalf("decode response: %v", err)
++	}
++	return body
++}
++
++func TestCodexAccountLimitsReturnsNormalizedCanonicalWindows(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	selected := activeCodexAuth("codex-test", "account-example")
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{selected},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 12.5,
++					"reset_at": 1786000000
++				},
++				"secondary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": 27,
++					"reset_at": 1786500000
++				}
++			}
++		}`),
++	}
++	rr := serveAccountLimits(manager)
++
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if body.SchemaVersion != 1 {
++		t.Fatalf("schema_version = %d, want 1", body.SchemaVersion)
++	}
++	if len(body.Windows) != 2 {
++		t.Fatalf("windows = %#v, want 2 canonical windows", body.Windows)
++	}
++	if got := body.Windows[0]; got.WindowMinutes != 300 || got.UsedPercent != 12.5 || got.ResetsAt != 1786000000 {
++		t.Fatalf("five-hour window = %#v, want normalized canonical window", got)
++	}
++	if got := body.Windows[1]; got.WindowMinutes != 10080 || got.UsedPercent != 27 || got.ResetsAt != 1786500000 {
++		t.Fatalf("seven-day window = %#v, want normalized canonical window", got)
++	}
++	if manager.selectedAuth != selected {
++		t.Fatal("request did not use the selected Codex account")
++	}
++	if manager.requestMethod != http.MethodGet {
++		t.Fatalf("request method = %q, want GET", manager.requestMethod)
++	}
++	if manager.requestURL != "https://chatgpt.com/backend-api/wham/usage" {
++		t.Fatalf("request URL = %q, want official account usage resource", manager.requestURL)
++	}
++	if got := manager.requestHeaders.Get("Chatgpt-Account-Id"); got != "account-example" {
++		t.Fatalf("account scope header = %q, want synthetic account ID", got)
++	}
++	if got := manager.requestHeaders.Get("Accept"); got != "application/json" {
++		t.Fatalf("Accept = %q, want application/json", got)
++	}
++	if got := manager.requestHeaders.Get("User-Agent"); got != "codex_cli_rs" {
++		t.Fatalf("User-Agent = %q, want stable Codex client identity", got)
++	}
++	if got := manager.requestHeaders.Get("Originator"); got != "codex_cli_rs" {
++		t.Fatalf("Originator = %q, want stable Codex client identity", got)
++	}
++}
++
++func TestCodexAccountLimitsResponseContainsOnlyNormalizedQuota(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	sensitiveMarker := "synthetic-private-marker"
++	selected := activeCodexAuth("private-auth-index", "account-example")
++	selected.FileName = "/example/private-auth.json"
++	selected.Label = sensitiveMarker
++	selected.Metadata["access_token"] = sensitiveMarker
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{selected},
++		response: jsonResponse(http.StatusOK, `{
++			"account_id": "account-example",
++			"email": "person@example.com",
++			"private_marker": "`+sensitiveMarker+`",
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 12.5,
++					"reset_at": 1786000000
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	for _, forbidden := range []string{
++		sensitiveMarker,
++		"private-auth-index",
++		"private-auth.json",
++		"account-example",
++		"person@example.com",
++		"access_token",
++	} {
++		if strings.Contains(rr.Body.String(), forbidden) {
++			t.Fatalf("body = %q, leaked forbidden marker %q", rr.Body.String(), forbidden)
++		}
++	}
++	var body map[string]json.RawMessage
++	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
++		t.Fatalf("decode response: %v", err)
++	}
++	if len(body) != 2 || body["schema_version"] == nil || body["windows"] == nil {
++		t.Fatalf("response keys = %#v, want only schema_version and windows", body)
++	}
++}
++
++func TestCodexAccountLimitsDisablesUpstreamRedirects(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 12.5
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	if !manager.newRequestRedirectsDisabled || !manager.httpRequestRedirectsDisabled {
++		t.Fatalf(
++			"redirect guard = new:%t execute:%t, want both enabled",
++			manager.newRequestRedirectsDisabled,
++			manager.httpRequestRedirectsDisabled,
++		)
++	}
++}
++
++func TestCodexAccountLimitsOrdersWindowsByCanonicalDuration(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": 27,
++					"reset_at": 1786500000
++				},
++				"secondary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 12.5,
++					"reset_at": 1786000000
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if len(body.Windows) != 2 {
++		t.Fatalf("windows = %#v, want 2 canonical windows", body.Windows)
++	}
++	if body.Windows[0].WindowMinutes != 300 || body.Windows[1].WindowMinutes != 10080 {
++		t.Fatalf("window order = %#v, want 300 then 10080 minutes", body.Windows)
++	}
++}
++
++func TestCodexAccountLimitsDiscardsInvalidResetOnly(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 42.5,
++					"reset_at": 99999999999
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if len(body.Windows) != 1 || body.Windows[0].WindowMinutes != 300 || body.Windows[0].UsedPercent != 42.5 {
++		t.Fatalf("windows = %#v, want valid utilization without reset", body.Windows)
++	}
++	if strings.Contains(rr.Body.String(), `"resets_at"`) {
++		t.Fatalf("body = %s, want invalid reset omitted", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsDiscardsMalformedResetOnly(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 42.5,
++					"reset_at": "not-a-timestamp"
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if len(body.Windows) != 1 || body.Windows[0].WindowMinutes != 300 || body.Windows[0].UsedPercent != 42.5 {
++		t.Fatalf("windows = %#v, want valid utilization without malformed reset", body.Windows)
++	}
++	if strings.Contains(rr.Body.String(), `"resets_at"`) {
++		t.Fatalf("body = %s, want malformed reset omitted", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsDiscardsOutOfRangeUtilization(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 101,
++					"reset_at": 1786000000
++				},
++				"secondary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": 27,
++					"reset_at": 1786500000
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if len(body.Windows) != 1 || body.Windows[0].WindowMinutes != 10080 {
++		t.Fatalf("windows = %#v, want only valid seven-day utilization", body.Windows)
++	}
++}
++
++func TestCodexAccountLimitsDiscardsMalformedUtilizationWindow(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": "not-a-percentage"
++				},
++				"secondary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": 27
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if len(body.Windows) != 1 || body.Windows[0].WindowMinutes != 10080 {
++		t.Fatalf("windows = %#v, want only independently valid seven-day window", body.Windows)
++	}
++}
++
++func TestCodexAccountLimitsDiscardsMalformedDurationWindow(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": "not-a-duration",
++					"used_percent": 12.5
++				},
++				"secondary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": 27
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	body := decodeLimitsResponse(t, rr)
++	if len(body.Windows) != 1 || body.Windows[0].WindowMinutes != 10080 {
++		t.Fatalf("windows = %#v, want only independently valid seven-day window", body.Windows)
++	}
++}
++
++func TestCodexAccountLimitsRejectsAllMalformedCanonicalWindows(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": "not-a-percentage"
++				},
++				"secondary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": null
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusBadGateway {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadGateway, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_malformed"}` {
++		t.Fatalf("body = %q, want sanitized malformed-data error", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsRejectsDuplicateCanonicalDuration(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 12.5,
++					"reset_at": 1786000000
++				},
++				"secondary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 25,
++					"reset_at": 1786100000
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusBadGateway {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadGateway, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_malformed"}` {
++		t.Fatalf("body = %q, want sanitized malformed-data error", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsRejectsDuplicateDurationWithInvalidUtilization(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 101
++				},
++				"secondary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 25
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusBadGateway {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadGateway, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_malformed"}` {
++		t.Fatalf("body = %q, want sanitized duplicate-duration error", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsRejectsMalformedUsageData(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	for _, test := range []struct {
++		name string
++		body string
++	}{
++		{name: "invalid JSON", body: `{"rate_limit":`},
++		{name: "missing quota structure", body: `{}`},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			manager := &fakeAuthManager{
++				auths:    []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++				response: jsonResponse(http.StatusOK, test.body),
++			}
++
++			rr := serveAccountLimits(manager)
++			if rr.Code != http.StatusBadGateway {
++				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadGateway, rr.Body.String())
++			}
++			if rr.Body.String() != `{"error":"codex_account_usage_malformed"}` {
++				t.Fatalf("body = %q, want sanitized malformed-data error", rr.Body.String())
++			}
++		})
++	}
++}
++
++func TestCodexAccountLimitsRejectsOversizedUsageResponse(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	body := `{"padding":"` + strings.Repeat("x", 70*1024) + `","rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":12.5}}}`
++	manager := &fakeAuthManager{
++		auths:    []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, body),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusBadGateway {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadGateway, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_too_large"}` {
++		t.Fatalf("body = %q, want sanitized size error", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsProvidesAnUpstreamDeadline(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths:           []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		requireDeadline: true,
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusGatewayTimeout {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusGatewayTimeout, rr.Body.String())
++	}
++	if !manager.newRequestHasDeadline || !manager.httpRequestHasDeadline {
++		t.Fatalf(
++			"deadline = new:%t execute:%t, want finite deadline on both operations",
++			manager.newRequestHasDeadline,
++			manager.httpRequestHasDeadline,
++		)
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_timeout"}` {
++		t.Fatalf("body = %q, want sanitized timeout error", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsReturnsSanitizedTimeout(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths:   []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		httpErr: context.DeadlineExceeded,
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusGatewayTimeout {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusGatewayTimeout, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_timeout"}` {
++		t.Fatalf("body = %q, want sanitized timeout error", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsSanitizesUpstreamFailure(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	sensitiveMarker := "synthetic-secret-marker"
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(
++			http.StatusUnauthorized,
++			`{"error":"`+sensitiveMarker+`","account_id":"account-example"}`,
++		),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusBadGateway {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusBadGateway, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_usage_unavailable"}` {
++		t.Fatalf("body = %q, want sanitized upstream error", rr.Body.String())
++	}
++	if strings.Contains(rr.Body.String(), sensitiveMarker) || strings.Contains(rr.Body.String(), "account-example") {
++		t.Fatalf("body = %q, leaked upstream or account metadata", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsReturnsAuthoritativeEmptyWithoutCanonicalWindows(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{activeCodexAuth("codex-test", "account-example")},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 3600,
++					"used_percent": 10
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	if rr.Body.String() != `{"schema_version":1,"windows":[]}` {
++		t.Fatalf("body = %q, want authoritative empty windows", rr.Body.String())
++	}
++}
++
++func TestCodexAccountLimitsIgnoresIneligibleAccounts(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	selected := activeCodexAuth("selected", "selected-account-example")
++	disabled := activeCodexAuth("disabled", "disabled-account-example")
++	disabled.Disabled = true
++	apiKey := activeCodexAuth("api-key", "api-key-account-example")
++	apiKey.Attributes[auth.AttributeAuthKind] = auth.AuthKindAPIKey
++	nonCodex := activeCodexAuth("claude", "claude-account-example")
++	nonCodex.Provider = "claude"
++	inactive := activeCodexAuth("inactive", "inactive-account-example")
++	inactive.Status = auth.StatusError
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{nil, disabled, apiKey, nonCodex, inactive, selected},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"primary_window": {
++					"limit_window_seconds": 18000,
++					"used_percent": 12.5
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	if manager.selectedAuth != selected {
++		t.Fatalf("selected auth = %#v, want only active Codex OAuth account", manager.selectedAuth)
++	}
++}
++
++func TestCodexAccountLimitsUsesAccountDuringQuotaCooldown(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	selected := activeCodexAuth("quota-cooldown", "account-example")
++	selected.Status = auth.StatusError
++	selected.Unavailable = true
++	selected.Quota = auth.QuotaState{
++		Exceeded: true,
++		Reason:   "quota",
++	}
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{selected},
++		response: jsonResponse(http.StatusOK, `{
++			"rate_limit": {
++				"secondary_window": {
++					"limit_window_seconds": 604800,
++					"used_percent": 100
++				}
++			}
++		}`),
++	}
++
++	rr := serveAccountLimits(manager)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
++	}
++	if manager.selectedAuth != selected {
++		t.Fatal("quota-cooldown Codex account was not used for the limits request")
++	}
++}
++
++func TestCodexAccountLimitsRejectsAmbiguousActiveAccounts(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	manager := &fakeAuthManager{
++		auths: []*auth.Auth{
++			activeCodexAuth("codex-one", "account-one-example"),
++			activeCodexAuth("codex-two", "account-two-example"),
++		},
++	}
++	rr := serveAccountLimits(manager)
++
++	if rr.Code != http.StatusConflict {
++		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusConflict, rr.Body.String())
++	}
++	if rr.Body.String() != `{"error":"codex_account_ambiguous"}` {
++		t.Fatalf("body = %q, want sanitized ambiguity error", rr.Body.String())
++	}
++	if manager.requestMethod != "" {
++		t.Fatal("ambiguous account selection performed upstream network work")
++	}
++}
++
++func TestLocalOnlyUsesDirectPeerAddress(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	tests := []struct {
++		name       string
++		remoteAddr string
++		headers    http.Header
++		wantStatus int
++	}{
++		{
++			name:       "IPv4 loopback",
++			remoteAddr: "127.0.0.1:1234",
++			wantStatus: http.StatusNoContent,
++		},
++		{
++			name:       "IPv6 loopback",
++			remoteAddr: "[::1]:1234",
++			wantStatus: http.StatusNoContent,
++		},
++		{
++			name:       "remote peer",
++			remoteAddr: "192.0.2.10:1234",
++			wantStatus: http.StatusNotFound,
++		},
++		{
++			name:       "malformed peer",
++			remoteAddr: "not-an-address",
++			wantStatus: http.StatusNotFound,
++		},
++		{
++			name:       "forwarded loopback cannot spoof remote peer",
++			remoteAddr: "192.0.2.10:1234",
++			headers: http.Header{
++				"X-Forwarded-For": []string{"127.0.0.1"},
++				"X-Real-Ip":       []string{"127.0.0.1"},
++			},
++			wantStatus: http.StatusNotFound,
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			router := gin.New()
++			router.GET("/limits", LocalOnly(), func(c *gin.Context) {
++				c.Status(http.StatusNoContent)
++			})
++
++			req := httptest.NewRequest(http.MethodGet, "/limits", nil)
++			req.RemoteAddr = test.remoteAddr
++			req.Host = "127.0.0.1:8317"
++			for name, values := range test.headers {
++				for _, value := range values {
++					req.Header.Add(name, value)
++				}
++			}
++			rr := httptest.NewRecorder()
++			router.ServeHTTP(rr, req)
++
++			if rr.Code != test.wantStatus {
++				t.Fatalf("status = %d, want %d", rr.Code, test.wantStatus)
++			}
++		})
++	}
++}

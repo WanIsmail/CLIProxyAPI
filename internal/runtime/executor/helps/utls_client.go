@@ -29,6 +29,21 @@ type utlsRoundTripper struct {
 	dialer proxy.Dialer
 }
 
+type failedContextDialer struct {
+	err error
+}
+
+func (d *failedContextDialer) Dial(_, _ string) (net.Conn, error) {
+	return nil, d.err
+}
+
+func (d *failedContextDialer) DialContext(
+	_ context.Context,
+	_, _ string,
+) (net.Conn, error) {
+	return nil, d.err
+}
+
 type closeConnectionBody struct {
 	io.ReadCloser
 	closeConnection func() error
@@ -60,6 +75,9 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			dialer = &failedContextDialer{
+				err: fmt.Errorf("utls: configure explicit proxy: %w", errBuild),
+			}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -352,6 +370,26 @@ type fallbackRoundTripper struct {
 	fallback  http.RoundTripper
 }
 
+type redirectsDisabledContextKey struct{}
+
+// WithRedirectsDisabled marks outbound requests that must return redirects
+// without following them.
+func WithRedirectsDisabled(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, redirectsDisabledContextKey{}, true)
+}
+
+// RedirectsDisabled reports whether an outbound request must not follow redirects.
+func RedirectsDisabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	disabled, _ := ctx.Value(redirectsDisabledContextKey{}).(bool)
+	return disabled
+}
+
 func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if IsAnthropicUpstreamURL(req.URL) {
 		return f.anthropic.RoundTrip(req)
@@ -399,6 +437,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			chrome:    chromeRT,
 			fallback:  standardTransport,
 		},
+	}
+	if RedirectsDisabled(ctx) {
+		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
 	}
 	if timeout > 0 {
 		client.Timeout = timeout

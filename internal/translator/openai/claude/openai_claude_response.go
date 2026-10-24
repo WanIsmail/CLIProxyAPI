@@ -80,6 +80,9 @@ type ToolCallAccumulator struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+	// ArgumentsEmitted is the raw byte offset already passed through the fixer.
+	ArgumentsEmitted int
+	ArgumentFixer    util.JSONStreamFixer
 	// StartEmitted tracks whether content_block_start has already been sent
 	// for this tool index.
 	StartEmitted bool
@@ -195,7 +198,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		}
 
 		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+		if reasoning := openAIReasoningNode(delta); reasoning.Exists() {
 			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 				if reasoningText == "" {
 					continue
@@ -331,6 +334,9 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 						emitToolUseStart(param, index, accumulator, &results)
 					}
 				}
+				if accumulator.StartEmitted && param.OpenToolCallIndex == index && !param.ContentBlocksStopped {
+					emitToolArgumentProgress(param, index, accumulator, false, &results)
+				}
 
 				return true
 			})
@@ -404,7 +410,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 		choice := choices.Array()[0] // Take first choice
 		var contentBlocks [][]byte
 
-		reasoningNode := choice.Get("message.reasoning_content")
+		reasoningNode := openAIReasoningNode(choice.Get("message"))
 		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
 			if reasoningText == "" {
 				continue
@@ -497,6 +503,17 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	p.NextContentBlockIndex++
 	p.ToolCallBlockIndexes[openAIToolIndex] = idx
 	return idx
+}
+
+// vLLM exposes reasoning under "reasoning"; older compatible providers use
+// "reasoning_content". Prefer the populated legacy field if both are present,
+// so a provider that emits both aliases does not duplicate thinking deltas.
+func openAIReasoningNode(message gjson.Result) gjson.Result {
+	legacy := message.Get("reasoning_content")
+	if legacy.Exists() && legacy.Type != gjson.Null && !(legacy.Type == gjson.String && legacy.String() == "") {
+		return legacy
+	}
+	return message.Get("reasoning")
 }
 
 func collectOpenAIReasoningTexts(node gjson.Result) []string {
@@ -611,19 +628,31 @@ func finalizeSingleToolCall(param *ConvertOpenAIResponseToAnthropicParams, openA
 	}
 	blockIndex := param.toolContentBlockIndex(openAIToolIndex)
 
-	// Send complete input_json_delta with all accumulated arguments
-	if accumulator.Arguments.Len() > 0 {
-		inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-		inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-		inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
-		*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
-	}
+	emitToolArgumentProgress(param, openAIToolIndex, accumulator, true, results)
 
 	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
 	contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", blockIndex)
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
 	delete(param.ToolCallBlockIndexes, openAIToolIndex)
 	param.OpenToolCallIndex = -1
+}
+
+// Only the open tool block may stream. Other parallel calls remain buffered
+// until their block opens, preserving Anthropic's sequential block contract.
+func emitToolArgumentProgress(param *ConvertOpenAIResponseToAnthropicParams, index int, accumulator *ToolCallAccumulator, final bool, results *[][]byte) {
+	args := accumulator.Arguments.String()
+	fragment := accumulator.ArgumentFixer.Write(args[accumulator.ArgumentsEmitted:])
+	accumulator.ArgumentsEmitted = len(args)
+	if final {
+		fragment += accumulator.ArgumentFixer.Finish()
+	}
+	if fragment == "" {
+		return
+	}
+	inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+	inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", param.toolContentBlockIndex(index))
+	inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", fragment)
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
 }
 
 func emitBufferedInterleavedContent(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte) {
@@ -833,7 +862,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+			if reasoning := openAIReasoningNode(message); reasoning.Exists() {
 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 					if reasoningText == "" {
 						continue

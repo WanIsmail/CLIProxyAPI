@@ -1,0 +1,356 @@
+--- a/internal/translator/openai/claude/openai_claude_response.go
++++ b/internal/translator/openai/claude/openai_claude_response.go
+@@ -80,6 +80,9 @@
+ 	ID        string
+ 	Name      string
+ 	Arguments strings.Builder
++	// ArgumentsEmitted is the raw byte offset already passed through the fixer.
++	ArgumentsEmitted int
++	ArgumentFixer    util.JSONStreamFixer
+ 	// StartEmitted tracks whether content_block_start has already been sent
+ 	// for this tool index.
+ 	StartEmitted bool
+@@ -331,6 +334,9 @@
+ 						emitToolUseStart(param, index, accumulator, &results)
+ 					}
+ 				}
++				if accumulator.StartEmitted && param.OpenToolCallIndex == index && !param.ContentBlocksStopped {
++					emitToolArgumentProgress(param, index, accumulator, false, &results)
++				}
+ 
+ 				return true
+ 			})
+@@ -622,19 +628,31 @@
+ 	}
+ 	blockIndex := param.toolContentBlockIndex(openAIToolIndex)
+ 
+-	// Send complete input_json_delta with all accumulated arguments
+-	if accumulator.Arguments.Len() > 0 {
+-		inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+-		inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
+-		inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
+-		*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
+-	}
++	emitToolArgumentProgress(param, openAIToolIndex, accumulator, true, results)
+ 
+ 	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+ 	contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", blockIndex)
+ 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+ 	delete(param.ToolCallBlockIndexes, openAIToolIndex)
+ 	param.OpenToolCallIndex = -1
++}
++
++// Only the open tool block may stream. Other parallel calls remain buffered
++// until their block opens, preserving Anthropic's sequential block contract.
++func emitToolArgumentProgress(param *ConvertOpenAIResponseToAnthropicParams, index int, accumulator *ToolCallAccumulator, final bool, results *[][]byte) {
++	args := accumulator.Arguments.String()
++	fragment := accumulator.ArgumentFixer.Write(args[accumulator.ArgumentsEmitted:])
++	accumulator.ArgumentsEmitted = len(args)
++	if final {
++		fragment += accumulator.ArgumentFixer.Finish()
++	}
++	if fragment == "" {
++		return
++	}
++	inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
++	inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", param.toolContentBlockIndex(index))
++	inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", fragment)
++	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
+ }
+ 
+ func emitBufferedInterleavedContent(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte) {
+--- a/internal/translator/openai/claude/openai_claude_response_test.go
++++ b/internal/translator/openai/claude/openai_claude_response_test.go
+@@ -918,10 +918,13 @@
+ 			toolDeltas = append(toolDeltas, e)
+ 		}
+ 	}
+-	if len(toolDeltas) != 1 {
+-		t.Fatalf("expected 1 tool input_json_delta, got %d", len(toolDeltas))
+-	}
+-	partialJSON := gjson.Get(toolDeltas[0].Payload, "delta.partial_json").String()
++	if len(toolDeltas) == 0 {
++		t.Fatal("expected tool input_json_delta events")
++	}
++	var partialJSON string
++	for _, delta := range toolDeltas {
++		partialJSON += gjson.Get(delta.Payload, "delta.partial_json").String()
++	}
+ 	if gotCmd := gjson.Get(partialJSON, "command").String(); gotCmd != "ls" {
+ 		t.Fatalf("expected command 'ls', got %q", gotCmd)
+ 	}
+@@ -1018,7 +1021,7 @@
+ 			case "thinking_delta":
+ 				thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
+ 			case "input_json_delta":
+-				toolDelta = gjson.Get(e.Payload, "delta.partial_json").String()
++				toolDelta += gjson.Get(e.Payload, "delta.partial_json").String()
+ 			}
+ 		}
+ 	}
+--- /dev/null
++++ b/internal/util/json_stream_fixer.go
+@@ -0,0 +1,75 @@
++package util
++
++import "strings"
++
++// JSONStreamFixer performs the same quote repair as FixJSON, without waiting
++// for a complete tool argument. Keep the two implementations aligned; the
++// boundary tests compare streaming output with the existing whole-input path.
++// Its zero value is ready for one stream. Finish must be called at stream end.
++type JSONStreamFixer struct {
++	inDouble bool
++	inSingle bool
++	escaped  bool
++}
++
++// Write returns the repaired fragment. UTF-8 bytes are preserved even when a
++// caller splits a code point across fragments; only ASCII syntax is examined.
++func (f *JSONStreamFixer) Write(input string) string {
++	var out strings.Builder
++	for i := range len(input) {
++		c := input[i]
++		if f.inDouble {
++			out.WriteByte(c)
++			if f.escaped {
++				f.escaped = false
++			} else if c == '\\' {
++				f.escaped = true
++			} else if c == '"' {
++				f.inDouble = false
++			}
++			continue
++		}
++		if f.inSingle {
++			if f.escaped {
++				f.escaped = false
++				if c != '\'' {
++					out.WriteByte('\\')
++				}
++				out.WriteByte(c)
++			} else if c == '\\' {
++				f.escaped = true
++			} else if c == '\'' {
++				out.WriteByte('"')
++				f.inSingle = false
++			} else {
++				if c == '"' {
++					out.WriteByte('\\')
++				}
++				out.WriteByte(c)
++			}
++			continue
++		}
++		switch c {
++		case '"':
++			f.inDouble = true
++			out.WriteByte(c)
++		case '\'':
++			f.inSingle = true
++			out.WriteByte('"')
++		default:
++			out.WriteByte(c)
++		}
++	}
++	return out.String()
++}
++
++// Finish preserves FixJSON's best-effort closure of an unfinished single
++// quoted string, including its handling of a dangling backslash.
++func (f *JSONStreamFixer) Finish() string {
++	if f.inSingle {
++		f.inSingle = false
++		f.escaped = false
++		return `"`
++	}
++	return ""
++}
+--- /dev/null
++++ b/internal/util/json_stream_fixer_test.go
+@@ -0,0 +1,52 @@
++package util
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestJSONStreamFixerMatchesWholeInputAcrossBoundaries(t *testing.T) {
++	inputs := []string{
++		`{"content":"valid JSON with apostrophe ' and emoji 🐉"}`,
++		`{'content': 'He said "hi" and it\'s fine', 'path': 'C:\\temp\\x'}`,
++		`{'escapes':'\n\r\t\b\f\/\"\u0041\u12zz\q'}`,
++		`{"quote":"escaped \" double","backslash":"\\"}`,
++		`{'unfinished': 'value`, `{'unfinished': 'backslash\`,
++		`{"unfinished":"value`, "", `{}`, `null`,
++	}
++	for _, input := range inputs {
++		want := FixJSON(input)
++		for split := 0; split <= len(input); split++ {
++			var fixer JSONStreamFixer
++			got := fixer.Write(input[:split]) + fixer.Write(input[split:]) + fixer.Finish()
++			if got != want {
++				t.Fatalf("split=%d input bytes=%d: streamed repair differs from whole input", split, len(input))
++			}
++			if fixer.Finish() != "" {
++				t.Fatal("repeated finish duplicated output")
++			}
++		}
++		var fixer JSONStreamFixer
++		var got strings.Builder
++		for i := range len(input) {
++			got.WriteString(fixer.Write(input[i : i+1]))
++		}
++		got.WriteString(fixer.Finish())
++		if got.String() != want {
++			t.Fatal("bytewise repair differs from whole input")
++		}
++	}
++}
++
++func TestJSONStreamFixerEmitsProgressBeforeFinish(t *testing.T) {
++	var fixer JSONStreamFixer
++	if got := fixer.Write(`{"content":"first`); got != `{"content":"first` {
++		t.Fatal("valid partial JSON was buffered or changed")
++	}
++	if got := fixer.Write(` last"}`); got != ` last"}` {
++		t.Fatal("later fragment was buffered or duplicated")
++	}
++	if fixer.Finish() != "" {
++		t.Fatal("valid JSON requires no final repair")
++	}
++}
+--- /dev/null
++++ b/internal/runtime/executor/openai_compat_executor_tool_stream_test.go
+@@ -0,0 +1,66 @@
++package executor
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
++)
++
++// Hold upstream completion until the downstream client receives the first
++// argument fragment. A proxy that buffers arguments until finish deadlocks
++// this handshake and can hide active generation from the client's watchdog.
++func TestOpenAICompatExecutorToolArgumentsArriveBeforeFinish(t *testing.T) {
++	gate := make(chan struct{})
++	var once sync.Once
++	release := func() { once.Do(func() { close(gate) }) }
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_, _ = io.Copy(io.Discard, r.Body)
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = io.WriteString(w, "data: "+`{"id":"fixture","model":"dragon-qwen3.8-flash-next-nvfp4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_fixture","type":"function","function":{"name":"Write","arguments":"{\"content\":\"first"}}]},"finish_reason":null}]}`+"\n\n")
++		w.(http.Flusher).Flush()
++		select {
++		case <-gate:
++		case <-r.Context().Done():
++			return
++		}
++		_, _ = io.WriteString(w, "data: "+`{"id":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" last\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":8}}`+"\n\ndata: [DONE]\n\n")
++	}))
++	defer server.Close()
++	defer release()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
++	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "fixture"}}
++	body := []byte(`{"model":"dragon-qwen3.8-flash-next-nvfp4","messages":[{"role":"user","content":"fixture"}],"tools":[{"name":"Write","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}],"stream":true,"max_tokens":32}`)
++	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "dragon-qwen3.8-flash-next-nvfp4", Payload: body},
++		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: body, Stream: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	sawInput, sawStop := false, false
++	for chunk := range result.Chunks {
++		if chunk.Err != nil {
++			t.Fatalf("stream failed before tool argument progress: %v (input=%t)", chunk.Err, sawInput)
++		}
++		if strings.Contains(string(chunk.Payload), `"type":"input_json_delta"`) {
++			sawInput = true
++			release()
++		}
++		if strings.Contains(string(chunk.Payload), "event: message_stop") {
++			sawStop = true
++		}
++	}
++	if !sawInput || !sawStop {
++		t.Fatalf("argument before finish=%t; terminal event=%t", sawInput, sawStop)
++	}
++}
+--- /dev/null
++++ b/internal/translator/openai/claude/openai_claude_tool_progress_test.go
+@@ -0,0 +1,61 @@
++package claude
++
++import (
++	"context"
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestToolArgumentsStreamAfterDelayedIdentity(t *testing.T) {
++	var state any
++	feed := func(call map[string]any, finish any) string {
++		chunk, _ := json.Marshal(map[string]any{"id": "fixture", "choices": []any{map[string]any{
++			"index": 0, "delta": map[string]any{"tool_calls": []any{call}}, "finish_reason": finish,
++		}}})
++		var result strings.Builder
++		for _, b := range ConvertOpenAIResponseToClaude(context.Background(), "", []byte(streamReq), nil, append([]byte("data: "), chunk...), &state) {
++			result.Write(b)
++		}
++		return result.String()
++	}
++	first := feed(map[string]any{"index": 0, "function": map[string]any{"name": "Write", "arguments": `{"content":"first`}}, nil)
++	if strings.Contains(first, "input_json_delta") {
++		t.Fatal("arguments emitted before identity was available")
++	}
++	second := feed(map[string]any{"index": 0, "id": "call_fixture"}, nil)
++	if !strings.Contains(second, "input_json_delta") || !strings.Contains(second, "content_block_start") {
++		t.Fatal("buffered prefix did not flush when identity became available")
++	}
++	third := feed(map[string]any{"index": 0, "function": map[string]any{"arguments": ` last"}`}}, nil)
++	if !strings.Contains(third, "input_json_delta") {
++		t.Fatal("later argument fragment did not stream before completion")
++	}
++	last := feed(map[string]any{"index": 0}, "tool_calls")
++	if strings.Contains(last, "input_json_delta") {
++		t.Fatal("completion duplicated already-streamed arguments")
++	}
++}
++
++func TestStreamingToolArgumentsPreserveParallelAndRepair(t *testing.T) {
++	events := runStream(t, streamReq,
++		`{"id":"fixture","choices":[{"delta":{"tool_calls":[{"index":0,"id":"first","function":{"name":"Write","arguments":"{'content': 'first\\"}},{"index":1,"id":"second","function":{"name":"Write","arguments":"{\"content\":\"other\"}"}}]}}]}`,
++		`{"id":"fixture","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"' last'}"}}]}}]}`,
++		`{"id":"fixture","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
++	)
++	assertSequentialContentBlocks(t, events)
++	args := map[int64]string{}
++	for _, e := range events {
++		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
++			args[gjson.Get(e.Payload, "index").Int()] += gjson.Get(e.Payload, "delta.partial_json").String()
++		}
++	}
++	if args[0] != `{"content": "first' last"}` || args[1] != `{"content":"other"}` {
++		t.Fatal("parallel tool arguments were duplicated, reordered or incorrectly repaired")
++	}
++	if countByType(events, "content_block_stop") != 2 || countByType(events, "message_stop") != 1 {
++		t.Fatal("tool blocks did not close exactly once")
++	}
++}

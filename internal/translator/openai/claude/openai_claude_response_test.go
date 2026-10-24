@@ -918,10 +918,13 @@ func TestStreaming_InterleavedContentAndToolUse_StrictSequentialBlocks(t *testin
 			toolDeltas = append(toolDeltas, e)
 		}
 	}
-	if len(toolDeltas) != 1 {
-		t.Fatalf("expected 1 tool input_json_delta, got %d", len(toolDeltas))
+	if len(toolDeltas) == 0 {
+		t.Fatal("expected tool input_json_delta events")
 	}
-	partialJSON := gjson.Get(toolDeltas[0].Payload, "delta.partial_json").String()
+	var partialJSON string
+	for _, delta := range toolDeltas {
+		partialJSON += gjson.Get(delta.Payload, "delta.partial_json").String()
+	}
 	if gotCmd := gjson.Get(partialJSON, "command").String(); gotCmd != "ls" {
 		t.Fatalf("expected command 'ls', got %q", gotCmd)
 	}
@@ -1018,7 +1021,7 @@ func TestStreaming_InterleavedTextAndThinkingPreservesOrder(t *testing.T) {
 			case "thinking_delta":
 				thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
 			case "input_json_delta":
-				toolDelta = gjson.Get(e.Payload, "delta.partial_json").String()
+				toolDelta += gjson.Get(e.Payload, "delta.partial_json").String()
 			}
 		}
 	}

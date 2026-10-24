@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	localHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/local"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
@@ -50,6 +51,14 @@ func (s *Server) setupRoutes() {
 	}
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
+
+	localHandler := localHandlers.NewHandler(s.handlers.AuthManager)
+	localGroup := s.engine.Group("/v0/local")
+	localGroup.Use(localHandlers.LocalOnly())
+	localGroup.GET("/codex/account-limits", localHandler.GetCodexAccountLimits)
+	localGroup.GET("/codex/account-limits/", func(c *gin.Context) {
+		c.AbortWithStatus(http.StatusNotFound)
+	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
