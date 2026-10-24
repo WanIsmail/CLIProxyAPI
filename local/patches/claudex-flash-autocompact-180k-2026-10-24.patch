@@ -1,0 +1,31 @@
+--- a/claude-codex
++++ b/claude-codex
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env bash
+-# Local launcher revision: 2026.10.22.1 (model-specific compaction windows)
++# Local launcher revision: 2026.10.24.1 (Flash compaction window 180K)
+ set -euo pipefail
+ 
+ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+@@ -445,8 +445,8 @@
+     --arg compact_window "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" \
+     '. + {availableModels: $selectable_models, enforceAvailableModels: true,
+             autoCompactWindow: 900000}
+-     | .modelSettings["dragon-qwen3.8-flash-next-nvfp4"].autoCompactWindow = 200000
+-     | .modelSettings["claude-gateway-dragon-qwen3-8-flash-next-nvfp4"].autoCompactWindow = 200000
++     | .modelSettings["dragon-qwen3.8-flash-next-nvfp4"].autoCompactWindow = 180000
++     | .modelSettings["claude-gateway-dragon-qwen3-8-flash-next-nvfp4"].autoCompactWindow = 180000
+      | if $statusline != "" then .statusLine.command = $statusline else . end
+      | if $compact_window != "" then .env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = $compact_window else . end' \
+     "$SETTINGS"
+--- a/tests/claudex-tab-resume.py
++++ b/tests/claudex-tab-resume.py
+@@ -188,7 +188,7 @@
+         self.assertEqual(result.args.count("900000"), 0)
+         settings = json.loads(result.args[result.args.index("--settings") + 1])
+         self.assertEqual(settings["autoCompactWindow"], 900000)
+-        self.assertEqual(settings["modelSettings"]["claude-gateway-dragon-qwen3-8-flash-next-nvfp4"]["autoCompactWindow"], 200000)
++        self.assertEqual(settings["modelSettings"]["claude-gateway-dragon-qwen3-8-flash-next-nvfp4"]["autoCompactWindow"], 180000)
+ 
+     def test_remembered_pair_restored_for_bare_launch_and_auto_resume(self):
+         self.remember()

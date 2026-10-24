@@ -1,0 +1,105 @@
+--- a/runtime/claude-codex
++++ b/runtime/claude-codex
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env bash
+-# Local launcher revision: 2026.10.16.1 (carried background compaction override)
++# Local launcher revision: 2026.10.22.1 (model-specific compaction windows)
+ set -euo pipefail
+ 
+ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+@@ -425,22 +425,9 @@
+   esac
+ fi
+ 
+-autocompact_args=()
+-has_explicit_autocompact=false
+-for argument in "$@"; do
+-  case "$argument" in
+-    --)
+-      break
+-      ;;
+-    --autocompact | --autocompact=*)
+-      has_explicit_autocompact=true
+-      break
+-      ;;
+-  esac
+-done
+-if ! $has_explicit_autocompact; then
+-  autocompact_args=(--autocompact 900000)
+-fi
++# Keep defaults in native model settings rather than a session-wide CLI
++# override: named resumes and in-session model switches must use the selected
++# model's budget. Explicit --autocompact arguments still pass through below.
+ 
+ statusline_command=''
+ if $memory_available && $interactive_session; then
+@@ -456,7 +443,10 @@
+ runtime_settings="$(
+   jq -c --argjson selectable_models "$selectable_models" --arg statusline "$statusline_command" \
+     --arg compact_window "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" \
+-    '. + {availableModels: $selectable_models, enforceAvailableModels: true}
++    '. + {availableModels: $selectable_models, enforceAvailableModels: true,
++            autoCompactWindow: 900000}
++     | .modelSettings["dragon-qwen3.8-flash-next-nvfp4"].autoCompactWindow = 200000
++     | .modelSettings["claude-gateway-dragon-qwen3-8-flash-next-nvfp4"].autoCompactWindow = 200000
+      | if $statusline != "" then .statusLine.command = $statusline else . end
+      | if $compact_window != "" then .env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = $compact_window else . end' \
+     "$SETTINGS"
+@@ -491,6 +481,5 @@
+   --append-system-prompt-file "$CONTEXT_PROMPT" \
+   --settings "$runtime_settings" \
+   --disallowedTools TaskOutput \
+-  "${autocompact_args[@]}" \
+   "${selection_args[@]}" \
+   "$@"
+--- a/runtime/tests/claude-codex-model.sh
++++ b/runtime/tests/claude-codex-model.sh
+@@ -120,8 +120,8 @@
+ grep -Fq "arg=$PROMPT_FILE" <<<"$default_output"
+ grep -Fq 'arg=--resume' <<<"$default_output"
+ grep -Fq 'arg=test-session' <<<"$default_output"
+-assert_arg_count "$default_output" '--autocompact' 1
+-assert_arg_count "$default_output" '900000' 1
++assert_arg_count "$default_output" '--autocompact' 0
++assert_arg_count "$default_output" '900000' 0
+ grep -Fxq -- '--user is-active --quiet cliproxyapi.service' "$default_systemctl_log"
+ grep -Fxq -- '--user is-active --quiet claudex-gateway.service' "$default_systemctl_log"
+ 
+@@ -240,8 +240,8 @@
+ grep -Fq 'arg=--' <<<"$terminator_output"
+ grep -Fq 'arg=--settings' <<<"$terminator_output"
+ grep -Fq 'arg={}' <<<"$terminator_output"
+-assert_arg_count "$terminator_output" '--autocompact' 2
+-assert_arg_count "$terminator_output" '900000' 1
++assert_arg_count "$terminator_output" '--autocompact' 1
++assert_arg_count "$terminator_output" '900000' 0
+ 
+ override_output="$({
+   PATH="$FIXTURE_BIN:$PATH" \
+@@ -271,8 +271,8 @@
+   >/dev/null <<<"${background_settings_line#arg=}"
+ assert_arg_count "$background_window_output" '--bg' 1
+ assert_arg_count "$background_window_output" '15100000-0000-4000-8000-000000000099' 1
+-assert_arg_count "$override_output" '--autocompact' 1
+-assert_arg_count "$override_output" '900000' 1
++assert_arg_count "$override_output" '--autocompact' 0
++assert_arg_count "$override_output" '900000' 0
+ 
+ custom_gateway_cache="$TEST_TMP/custom-gateway-models.json"
+ custom_systemctl_log="$TEST_TMP/custom-systemctl.log"
+--- a/runtime/tests/claudex-tab-resume.py
++++ b/runtime/tests/claudex-tab-resume.py
+@@ -184,8 +184,11 @@
+             elif argument == "--resume":
+                 selectors.append(result.args[index + 1])
+         self.assertEqual(selectors, [] if resume is None else [resume])
+-        self.assertEqual(result.args.count("--autocompact"), 1)
+-        self.assertEqual(result.args.count("900000"), 1)
++        self.assertEqual(result.args.count("--autocompact"), 0)
++        self.assertEqual(result.args.count("900000"), 0)
++        settings = json.loads(result.args[result.args.index("--settings") + 1])
++        self.assertEqual(settings["autoCompactWindow"], 900000)
++        self.assertEqual(settings["modelSettings"]["claude-gateway-dragon-qwen3-8-flash-next-nvfp4"]["autoCompactWindow"], 200000)
+ 
+     def test_remembered_pair_restored_for_bare_launch_and_auto_resume(self):
+         self.remember()
