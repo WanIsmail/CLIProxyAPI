@@ -59,11 +59,20 @@ try:
         if 'bypasspermissionson' in compact:
             break
         if 'no,disableexternalimports' in compact and 'external' not in handled:
-            handled.add('external'); time.sleep(.5); child.send('\r'); screen = ''
+            handled.add('external')
+            time.sleep(.5)
+            child.send('\r')
+            screen = ''
         elif 'yes,iaccept' in compact and 'bypass' not in handled:
-            handled.add('bypass'); time.sleep(.5); child.send('\x1b[B\r'); screen = ''
+            handled.add('bypass')
+            time.sleep(.5)
+            child.send('\x1b[B\r')
+            screen = ''
         elif 'yes,itrust' in compact and 'trust' not in handled:
-            handled.add('trust'); time.sleep(.5); child.send('\r'); screen = ''
+            handled.add('trust')
+            time.sleep(.5)
+            child.send('\r')
+            screen = ''
     else:
         report['setup_tail'] = clean[-1400:]
         raise pexpect.TIMEOUT('setup did not finish')
