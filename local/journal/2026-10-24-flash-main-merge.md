@@ -58,6 +58,19 @@ The baseline test failure was already disclosed when the operator requested
 this merge. It remains an explicit qualification limit, not a full-suite PASS.
 Dragon's deployment gate is outside this source-only CLIProxyAPI integration.
 
+The merge-time hook additionally reported upstream Python lint finding F841 at
+`examples/plugin/scripts/generate_examples.py:522` (unused `ident`). This file's
+Git blob is identical to official v7.3.3, so it is an inherited finding rather
+than a maintenance-patch change. Direct lint checks on all four local probe and
+policy scripts pass. The hooks printed success despite that lint finding and
+reported no recognized project type during pre-push; their success banners are
+not used as validation evidence. The explicit checks above are authoritative.
+
+Merge commit `58ebfa9bc213a025af98dd37cc0901bfa9ad37e2` was pushed to
+`WanIsmail/CLIProxyAPI` and verified by reading remote `refs/heads/main`.
+This follow-up documentation commit records the hook finding without changing
+the tested server implementation or runtime state.
+
 ## Preservation and cleanup
 
 The original checkout stays on `feat/claudex-native-tasks-20261014` so its seven
