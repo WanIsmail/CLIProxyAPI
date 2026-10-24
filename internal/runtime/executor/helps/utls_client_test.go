@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,38 +30,171 @@ func (f utlsClientRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, e
 	return f(req)
 }
 
-type controlledContextDialer struct {
-	started      chan struct{}
-	release      chan struct{}
-	blockDirect  bool
-	directCalls  int
-	contextCalls int
+type trackedReadCloser struct {
+	io.Reader
+	closeCount int
+	closeErr   error
+	onClose    func()
 }
 
-func (d *controlledContextDialer) signalStarted() {
-	d.started <- struct{}{}
-}
-
-func (d *controlledContextDialer) Dial(_, _ string) (net.Conn, error) {
-	d.directCalls++
-	d.signalStarted()
-	if d.blockDirect {
-		<-d.release
+func (r *trackedReadCloser) Close() error {
+	r.closeCount++
+	if r.onClose != nil {
+		r.onClose()
 	}
-	return nil, errors.New("synthetic direct dial used")
+	return r.closeErr
 }
 
-func (d *controlledContextDialer) DialContext(
-	ctx context.Context,
-	_, _ string,
-) (net.Conn, error) {
-	d.contextCalls++
-	d.signalStarted()
-	select {
-	case <-ctx.Done():
+type contextDialerFunc func(context.Context, string, string) (net.Conn, error)
+
+func (f contextDialerFunc) Dial(network, addr string) (net.Conn, error) {
+	return f(context.Background(), network, addr)
+}
+
+func (f contextDialerFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f(ctx, network, addr)
+}
+
+type trackedNetConn struct {
+	net.Conn
+	closeCount atomic.Int32
+}
+
+func (c *trackedNetConn) Close() error {
+	c.closeCount.Add(1)
+	return c.Conn.Close()
+}
+
+func TestCloseConnectionBodyClosesConnectionBeforeBodyOnce(t *testing.T) {
+	bodyErr := errors.New("body close failed")
+	connectionErr := errors.New("connection close failed")
+	var closeOrder []string
+	body := &trackedReadCloser{
+		Reader:   strings.NewReader("response"),
+		closeErr: bodyErr,
+		onClose: func() {
+			closeOrder = append(closeOrder, "body")
+		},
+	}
+	connectionCloseCount := 0
+	wrapped := &closeConnectionBody{
+		ReadCloser: body,
+		closeConnection: func() error {
+			connectionCloseCount++
+			closeOrder = append(closeOrder, "connection")
+			return connectionErr
+		},
+	}
+
+	payload, errRead := io.ReadAll(wrapped)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if got, want := string(payload), "response"; got != want {
+		t.Fatalf("response body = %q, want %q", got, want)
+	}
+
+	errClose := wrapped.Close()
+	if !errors.Is(errClose, bodyErr) {
+		t.Fatalf("close error = %v, want body close error", errClose)
+	}
+	if !errors.Is(errClose, connectionErr) {
+		t.Fatalf("close error = %v, want connection close error", errClose)
+	}
+	if errCloseAgain := wrapped.Close(); errCloseAgain != errClose {
+		t.Fatalf("second close error = %v, want %v", errCloseAgain, errClose)
+	}
+	if body.closeCount != 1 {
+		t.Fatalf("body close count = %d, want 1", body.closeCount)
+	}
+	if connectionCloseCount != 1 {
+		t.Fatalf("connection close count = %d, want 1", connectionCloseCount)
+	}
+	if want := []string{"connection", "body"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %v, want %v", closeOrder, want)
+	}
+}
+
+func TestUtlsRoundTripperDialUsesRequestContext(t *testing.T) {
+	dialStarted := make(chan struct{})
+	roundTripper := &utlsRoundTripper{dialer: contextDialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
+		close(dialStarted)
+		<-ctx.Done()
 		return nil, ctx.Err()
-	case <-d.release:
-		return nil, errors.New("synthetic context dial released")
+	})}
+	ctx, cancel := context.WithCancel(t.Context())
+	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	roundTripDone := make(chan error, 1)
+	go func() {
+		resp, errRoundTrip := roundTripper.RoundTrip(req)
+		if resp != nil && resp.Body != nil {
+			errRoundTrip = errors.Join(errRoundTrip, resp.Body.Close())
+		}
+		roundTripDone <- errRoundTrip
+	}()
+
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("dial did not start")
+	}
+	cancel()
+	select {
+	case errRoundTrip := <-roundTripDone:
+		if !errors.Is(errRoundTrip, context.Canceled) {
+			t.Fatalf("RoundTrip error = %v, want context canceled", errRoundTrip)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RoundTrip did not stop after context cancellation")
+	}
+}
+
+func TestUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		if errClose := clientConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) && !errors.Is(errClose, io.ErrClosedPipe) {
+			t.Errorf("close client connection: %v", errClose)
+		}
+		if errClose := serverConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) && !errors.Is(errClose, io.ErrClosedPipe) {
+			t.Errorf("close server connection: %v", errClose)
+		}
+	})
+
+	trackedConn := &trackedNetConn{Conn: clientConn}
+	dialDone := make(chan struct{})
+	roundTripper := &utlsRoundTripper{dialer: contextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		close(dialDone)
+		return trackedConn, nil
+	})}
+	ctx, cancel := context.WithCancel(t.Context())
+	connectionDone := make(chan error, 1)
+	go func() {
+		h2Conn, errConnect := roundTripper.createConnection(ctx, "chatgpt.com", "chatgpt.com:443")
+		if h2Conn != nil {
+			errConnect = errors.Join(errConnect, h2Conn.Close())
+		}
+		connectionDone <- errConnect
+	}()
+
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("dial did not complete")
+	}
+	cancel()
+	select {
+	case errConnect := <-connectionDone:
+		if !errors.Is(errConnect, context.Canceled) {
+			t.Fatalf("createConnection error = %v, want context canceled", errConnect)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS handshake did not stop after context cancellation")
+	}
+	if got := trackedConn.closeCount.Load(); got != 1 {
+		t.Fatalf("connection close count = %d, want 1", got)
 	}
 }
 
@@ -320,102 +454,7 @@ func TestUtlsRoundTripperRejectsInvalidExplicitProxy(t *testing.T) {
 	}
 }
 
-func TestUtlsRoundTripperUsesRequestContextForDial(t *testing.T) {
-	dialer := &controlledContextDialer{
-		started: make(chan struct{}, 1),
-		release: make(chan struct{}),
-	}
-	roundTripper := newUtlsRoundTripper("")
-	roundTripper.dialer = dialer
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	request, errRequest := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		"https://chatgpt.com/backend-api/wham/usage",
-		nil,
-	)
-	if errRequest != nil {
-		t.Fatal(errRequest)
-	}
-
-	_, errRoundTrip := roundTripper.RoundTrip(request)
-	if !errors.Is(errRoundTrip, context.DeadlineExceeded) {
-		t.Fatalf("RoundTrip error = %v, want context deadline", errRoundTrip)
-	}
-	if dialer.directCalls != 0 || dialer.contextCalls != 1 {
-		t.Fatalf(
-			"dial calls = direct:%d context:%d, want only one context dial",
-			dialer.directCalls,
-			dialer.contextCalls,
-		)
-	}
-}
-
-func TestUtlsRoundTripperCancelsPendingConnectionWait(t *testing.T) {
-	dialer := &controlledContextDialer{
-		started:     make(chan struct{}, 2),
-		release:     make(chan struct{}),
-		blockDirect: true,
-	}
-	roundTripper := newUtlsRoundTripper("")
-	roundTripper.dialer = dialer
-	firstRequest, errRequest := http.NewRequest(
-		http.MethodGet,
-		"https://chatgpt.com/backend-api/wham/usage",
-		nil,
-	)
-	if errRequest != nil {
-		t.Fatal(errRequest)
-	}
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := roundTripper.RoundTrip(firstRequest)
-		firstDone <- err
-	}()
-	<-dialer.started
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	secondRequest, errRequest := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		"https://chatgpt.com/backend-api/wham/usage",
-		nil,
-	)
-	if errRequest != nil {
-		t.Fatal(errRequest)
-	}
-	secondDone := make(chan error, 1)
-	go func() {
-		_, err := roundTripper.RoundTrip(secondRequest)
-		secondDone <- err
-	}()
-
-	var secondErr error
-	returnedBeforeRelease := false
-	select {
-	case secondErr = <-secondDone:
-		returnedBeforeRelease = true
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(dialer.release)
-	if !returnedBeforeRelease {
-		secondErr = <-secondDone
-	}
-	<-firstDone
-
-	if !returnedBeforeRelease {
-		t.Fatal("pending connection wait ignored the request deadline")
-	}
-	if !errors.Is(secondErr, context.DeadlineExceeded) {
-		t.Fatalf("pending wait error = %v, want context deadline", secondErr)
-	}
-}
-
 func TestNewUtlsHTTPClientCanDisableRedirectsFromContext(t *testing.T) {
-	t.Parallel()
-
 	calls := 0
 	roundTripper := utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
@@ -657,4 +696,133 @@ func summarizeClaudeCodeClientHelloSpec(t *testing.T, spec *tls.ClientHelloSpec)
 	digest := md5.Sum([]byte(summary.JA3)) // #nosec G401 -- JA3 requires MD5.
 	summary.JA3MD5 = hex.EncodeToString(digest[:])
 	return summary
+}
+
+// Retained local cancellation checks also cover v7.3.3 dedicated connections.
+type controlledContextDialer struct {
+	started      chan struct{}
+	release      chan struct{}
+	blockDirect  bool
+	directCalls  atomic.Int32
+	contextCalls atomic.Int32
+}
+
+func (d *controlledContextDialer) signalStarted() {
+	d.started <- struct{}{}
+}
+
+func (d *controlledContextDialer) Dial(_, _ string) (net.Conn, error) {
+	d.directCalls.Add(1)
+	d.signalStarted()
+	if d.blockDirect {
+		<-d.release
+	}
+	return nil, errors.New("synthetic direct dial used")
+}
+
+func (d *controlledContextDialer) DialContext(
+	ctx context.Context,
+	_, _ string,
+) (net.Conn, error) {
+	d.contextCalls.Add(1)
+	d.signalStarted()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-d.release:
+		return nil, errors.New("synthetic context dial released")
+	}
+}
+
+func TestUtlsRoundTripperUsesRequestContextForDial(t *testing.T) {
+	dialer := &controlledContextDialer{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	roundTripper := newUtlsRoundTripper("")
+	roundTripper.dialer = dialer
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	request, errRequest := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+
+	_, errRoundTrip := roundTripper.RoundTrip(request)
+	if !errors.Is(errRoundTrip, context.DeadlineExceeded) {
+		t.Fatalf("RoundTrip error = %v, want context deadline", errRoundTrip)
+	}
+	if dialer.directCalls.Load() != 0 || dialer.contextCalls.Load() != 1 {
+		t.Fatalf(
+			"dial calls = direct:%d context:%d, want only one context dial",
+			dialer.directCalls.Load(),
+			dialer.contextCalls.Load(),
+		)
+	}
+}
+
+func TestUtlsRoundTripperSecondRequestCancelsWhileFirstIsBlocked(t *testing.T) {
+	dialer := &controlledContextDialer{
+		started:     make(chan struct{}, 2),
+		release:     make(chan struct{}),
+		blockDirect: true,
+	}
+	roundTripper := newUtlsRoundTripper("")
+	roundTripper.dialer = dialer
+	firstRequest, errRequest := http.NewRequest(
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := roundTripper.RoundTrip(firstRequest)
+		firstDone <- err
+	}()
+	<-dialer.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	secondRequest, errRequest := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"https://chatgpt.com/backend-api/wham/usage",
+		nil,
+	)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := roundTripper.RoundTrip(secondRequest)
+		secondDone <- err
+	}()
+
+	var secondErr error
+	returnedBeforeRelease := false
+	select {
+	case secondErr = <-secondDone:
+		returnedBeforeRelease = true
+	case <-time.After(time.Second):
+	}
+	close(dialer.release)
+	if !returnedBeforeRelease {
+		secondErr = <-secondDone
+	}
+	<-firstDone
+
+	if !returnedBeforeRelease {
+		t.Fatal("second request ignored its deadline while the first was blocked")
+	}
+	if !errors.Is(secondErr, context.DeadlineExceeded) {
+		t.Fatalf("second request error = %v, want context deadline", secondErr)
+	}
 }

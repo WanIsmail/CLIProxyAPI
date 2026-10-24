@@ -2,7 +2,9 @@ package helps
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -21,12 +23,10 @@ import (
 )
 
 // utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
-// providers that require a browser-like TLS and HTTP/2 transport.
+// providers that require a browser-like TLS and HTTP/2 transport. Each request
+// gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
-	pending     map[string]chan struct{}
-	dialer      proxy.Dialer
+	dialer proxy.Dialer
 }
 
 type failedContextDialer struct {
@@ -44,6 +44,31 @@ func (d *failedContextDialer) DialContext(
 	return nil, d.err
 }
 
+type closeConnectionBody struct {
+	io.ReadCloser
+	closeConnection func() error
+	once            sync.Once
+	err             error
+}
+
+func (b *closeConnectionBody) Close() error {
+	if b == nil {
+		return nil
+	}
+	b.once.Do(func() {
+		var errConnection error
+		if b.closeConnection != nil {
+			errConnection = b.closeConnection()
+		}
+		var errBody error
+		if b.ReadCloser != nil {
+			errBody = b.ReadCloser.Close()
+		}
+		b.err = errors.Join(errBody, errConnection)
+	})
+	return b.err
+}
+
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
@@ -57,78 +82,39 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 			dialer = proxyDialer
 		}
 	}
-	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]chan struct{}),
-		dialer:      dialer,
-	}
+	return &utlsRoundTripper{dialer: dialer}
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(
-	ctx context.Context,
-	host, addr string,
-) (*http2.ClientConn, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		t.mu.Lock()
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-			t.mu.Unlock()
-			return h2Conn, nil
-		}
-		if pending, ok := t.pending[host]; ok {
-			t.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-pending:
-				continue
-			}
-		}
-
-		pending := make(chan struct{})
-		t.pending[host] = pending
-		t.mu.Unlock()
-
-		h2Conn, err := t.createConnection(ctx, host, addr)
-		t.mu.Lock()
-		delete(t.pending, host)
-		if err == nil {
-			t.connections[host] = h2Conn
-		}
-		close(pending)
-		t.mu.Unlock()
-		return h2Conn, err
-	}
-}
-
-func (t *utlsRoundTripper) createConnection(
-	ctx context.Context,
-	host, addr string,
-) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
 	contextDialer, ok := t.dialer.(proxy.ContextDialer)
 	if !ok {
 		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
 	}
-	conn, err := contextDialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
+	conn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
+	if errDial != nil {
+		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		conn.Close()
-		return nil, err
+	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
+		}
+		if errClose := conn.Close(); errClose != nil {
+			return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
+		}
+		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
 
 	tr := &http2.Transport{}
-	h2Conn, err := tr.NewClientConn(tlsConn)
-	if err != nil {
-		tlsConn.Close()
-		return nil, err
+	h2Conn, errClientConn := tr.NewClientConn(tlsConn)
+	if errClientConn != nil {
+		if errClose := tlsConn.Close(); errClose != nil {
+			return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w; close TLS connection: %v", errClientConn, errClose)
+		}
+		return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
 	}
 
 	return h2Conn, nil
@@ -142,21 +128,31 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
+	h2Conn, err := t.createConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		t.mu.Lock()
-		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-			delete(t.connections, hostname)
+		if errClose := h2Conn.Close(); errClose != nil {
+			log.Debugf("utls: close connection after round trip failure: %v", errClose)
 		}
-		t.mu.Unlock()
 		return nil, err
 	}
-
+	if resp == nil {
+		if errClose := h2Conn.Close(); errClose != nil {
+			log.Debugf("utls: close connection after empty response: %v", errClose)
+		}
+		return nil, fmt.Errorf("utls: upstream returned an empty response")
+	}
+	if resp.Body == nil {
+		resp.Body = http.NoBody
+	}
+	resp.Body = &closeConnectionBody{
+		ReadCloser:      resp.Body,
+		closeConnection: h2Conn.Close,
+	}
 	return resp, nil
 }
 
@@ -374,16 +370,6 @@ type fallbackRoundTripper struct {
 	fallback  http.RoundTripper
 }
 
-func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if IsAnthropicUpstreamURL(req.URL) {
-		return f.anthropic.RoundTrip(req)
-	}
-	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
-		return f.chrome.RoundTrip(req)
-	}
-	return f.fallback.RoundTrip(req)
-}
-
 type redirectsDisabledContextKey struct{}
 
 // WithRedirectsDisabled marks outbound requests that must return redirects
@@ -402,6 +388,16 @@ func RedirectsDisabled(ctx context.Context) bool {
 	}
 	disabled, _ := ctx.Value(redirectsDisabledContextKey{}).(bool)
 	return disabled
+}
+
+func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if IsAnthropicUpstreamURL(req.URL) {
+		return f.anthropic.RoundTrip(req)
+	}
+	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
+		return f.chrome.RoundTrip(req)
+	}
+	return f.fallback.RoundTrip(req)
 }
 
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS

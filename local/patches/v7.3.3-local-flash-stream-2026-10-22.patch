@@ -1,0 +1,542 @@
+diff --git a/internal/translator/openai/claude/openai_claude_response.go b/internal/translator/openai/claude/openai_claude_response.go
+index 2e61a67a..347f2102 100644
+--- a/internal/translator/openai/claude/openai_claude_response.go
++++ b/internal/translator/openai/claude/openai_claude_response.go
+@@ -195,7 +195,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
+ 		}
+ 
+ 		// Handle reasoning content delta
+-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
++		if reasoning := openAIReasoningNode(delta); reasoning.Exists() {
+ 			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
+ 				if reasoningText == "" {
+ 					continue
+@@ -404,7 +404,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
+ 		choice := choices.Array()[0] // Take first choice
+ 		var contentBlocks [][]byte
+ 
+-		reasoningNode := choice.Get("message.reasoning_content")
++		reasoningNode := openAIReasoningNode(choice.Get("message"))
+ 		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
+ 			if reasoningText == "" {
+ 				continue
+@@ -499,6 +499,17 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
+ 	return idx
+ }
+ 
++// vLLM exposes reasoning under "reasoning"; older compatible providers use
++// "reasoning_content". Prefer the populated legacy field if both are present,
++// so a provider that emits both aliases does not duplicate thinking deltas.
++func openAIReasoningNode(message gjson.Result) gjson.Result {
++	legacy := message.Get("reasoning_content")
++	if legacy.Exists() && legacy.Type != gjson.Null && !(legacy.Type == gjson.String && legacy.String() == "") {
++		return legacy
++	}
++	return message.Get("reasoning")
++}
++
+ func collectOpenAIReasoningTexts(node gjson.Result) []string {
+ 	var texts []string
+ 	if !node.Exists() {
+@@ -833,7 +844,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
+ 				}
+ 			}
+ 
+-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
++			if reasoning := openAIReasoningNode(message); reasoning.Exists() {
+ 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
+ 					if reasoningText == "" {
+ 						continue
+diff --git a/sdk/api/handlers/claude/code_handlers.go b/sdk/api/handlers/claude/code_handlers.go
+index c7226315..7bf19058 100644
+--- a/sdk/api/handlers/claude/code_handlers.go
++++ b/sdk/api/handlers/claude/code_handlers.go
+@@ -237,13 +237,62 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
+ 	// This allows proper cleanup and cancellation of ongoing requests
+ 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+ 
+-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+ 	setSSEHeaders := func() {
+ 		c.Header("Content-Type", "text/event-stream")
+ 		c.Header("Cache-Control", "no-cache")
+ 		c.Header("Connection", "keep-alive")
+ 		c.Header("Access-Control-Allow-Origin", "*")
+ 	}
++	type streamExecution struct {
++		data    <-chan []byte
++		headers http.Header
++		errs    <-chan *interfaces.ErrorMessage
++	}
++	execution := make(chan streamExecution, 1)
++	go func() {
++		data, headers, errs := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
++		execution <- streamExecution{data: data, headers: headers, errs: errs}
++	}()
++
++	keepAliveInterval := handlers.StreamingKeepAliveInterval(h.Cfg)
++	var keepAlive *time.Ticker
++	var keepAliveC <-chan time.Time
++	if keepAliveInterval > 0 {
++		keepAlive = time.NewTicker(keepAliveInterval)
++		defer keepAlive.Stop()
++		keepAliveC = keepAlive.C
++	}
++
++	var dataChan <-chan []byte
++	var upstreamHeaders http.Header
++	var errChan <-chan *interfaces.ErrorMessage
++	streamCommitted := false
++
++awaitExecution:
++	for {
++		select {
++		case <-c.Request.Context().Done():
++			cliCancel(c.Request.Context().Err())
++			return
++		case result := <-execution:
++			dataChan = result.data
++			upstreamHeaders = result.headers
++			errChan = result.errs
++			break awaitExecution
++		case <-keepAliveC:
++			if !streamCommitted {
++				setSSEHeaders()
++				streamCommitted = true
++			}
++			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
++			flusher.Flush()
++		}
++	}
++
++	if streamCommitted {
++		h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
++		return
++	}
+ 
+ 	// Peek at the first chunk to determine success or failure before setting headers
+ 	for {
+diff --git a/sdk/api/handlers/claude/code_handlers_bootstrap_heartbeat_test.go b/sdk/api/handlers/claude/code_handlers_bootstrap_heartbeat_test.go
+new file mode 100644
+index 00000000..990d07db
+--- /dev/null
++++ b/sdk/api/handlers/claude/code_handlers_bootstrap_heartbeat_test.go
+@@ -0,0 +1,291 @@
++package claude
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
++)
++
++type bootstrapHeartbeatExecutor struct {
++	chunks           <-chan coreexecutor.StreamChunk
++	waitBeforeResult <-chan struct{}
++}
++
++func (*bootstrapHeartbeatExecutor) Identifier() string { return "claude" }
++
++func (*bootstrapHeartbeatExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
++	return coreexecutor.Response{}, errors.New("not implemented")
++}
++
++func (e *bootstrapHeartbeatExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
++	if e.waitBeforeResult != nil {
++		select {
++		case <-e.waitBeforeResult:
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		}
++	}
++	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
++}
++
++func (*bootstrapHeartbeatExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
++	return auth, nil
++}
++
++func (*bootstrapHeartbeatExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
++	return coreexecutor.Response{}, errors.New("not implemented")
++}
++
++func (*bootstrapHeartbeatExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
++	return nil, errors.New("not implemented")
++}
++
++func newBootstrapHeartbeatServer(t *testing.T, chunks <-chan coreexecutor.StreamChunk) (*httptest.Server, string) {
++	return newBootstrapHeartbeatServerWithGate(t, chunks, nil)
++}
++
++func newBootstrapHeartbeatServerWithGate(t *testing.T, chunks <-chan coreexecutor.StreamChunk, waitBeforeResult <-chan struct{}) (*httptest.Server, string) {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	manager := coreauth.NewManager(nil, nil, nil)
++	manager.SetRetryConfig(0, 0, 0)
++	manager.RegisterExecutor(&bootstrapHeartbeatExecutor{chunks: chunks, waitBeforeResult: waitBeforeResult})
++
++	const model = "claude-bootstrap-heartbeat-test"
++	auth := &coreauth.Auth{ID: "bootstrap-heartbeat-auth", Provider: "claude", Status: coreauth.StatusActive}
++	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
++	if _, err := manager.Register(context.Background(), auth); err != nil {
++		t.Fatalf("Register() error = %v", err)
++	}
++
++	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{
++		Streaming: config.StreamingConfig{KeepAliveSeconds: 1},
++	}, manager)
++	handler := NewClaudeCodeAPIHandler(base)
++	router := gin.New()
++	router.POST("/v1/messages", handler.ClaudeMessages)
++	server := httptest.NewServer(router)
++	t.Cleanup(server.Close)
++	return server, model
++}
++
++func newBootstrapHeartbeatRequest(t *testing.T, serverURL, model string) *http.Request {
++	t.Helper()
++
++	body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"\u0070\u0072\u006f\u0062\u0065"}],"max_tokens":16,"stream":true}`)
++	request, err := http.NewRequest(http.MethodPost, serverURL+"/v1/messages", bytes.NewReader(body))
++	if err != nil {
++		t.Fatalf("NewRequest() error = %v", err)
++	}
++	request.Header.Set("Content-Type", "application/json")
++	return request
++}
++
++func readSSEFrame(t *testing.T, reader *bufio.Reader) string {
++	t.Helper()
++	var frame strings.Builder
++	for {
++		line, err := reader.ReadString('\n')
++		if err != nil {
++			t.Fatalf("read SSE frame: %v", err)
++		}
++		if line == "\n" {
++			return frame.String()
++		}
++		frame.WriteString(line)
++	}
++}
++
++func TestClaudeStreamingSendsHeartbeatWhileWaitingForFirstProviderChunk(t *testing.T) {
++	chunks := make(chan coreexecutor.StreamChunk)
++	server, model := newBootstrapHeartbeatServer(t, chunks)
++	request := newBootstrapHeartbeatRequest(t, server.URL, model)
++	client := &http.Client{Timeout: 2500 * time.Millisecond}
++
++	response, err := client.Do(request)
++	if err != nil {
++		t.Fatalf("waiting for bootstrap heartbeat: %v", err)
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
++	}
++	line, err := bufio.NewReader(response.Body).ReadString('\n')
++	if err != nil {
++		t.Fatalf("read bootstrap heartbeat: %v", err)
++	}
++	if line != ": keep-alive\n" {
++		t.Fatalf("first stream line = %q, want heartbeat", line)
++	}
++}
++
++func TestClaudeStreamingPreservesThinkingAndToolJSONDeltasAcrossHeartbeatBoundaries(t *testing.T) {
++	releaseExecution := make(chan struct{})
++	released := false
++	defer func() {
++		if !released {
++			close(releaseExecution)
++		}
++	}()
++	chunks := make(chan coreexecutor.StreamChunk, 1)
++	server, model := newBootstrapHeartbeatServerWithGate(t, chunks, releaseExecution)
++	request := newBootstrapHeartbeatRequest(t, server.URL, model)
++	client := &http.Client{Timeout: 7 * time.Second}
++
++	response, err := client.Do(request)
++	if err != nil {
++		t.Fatalf("waiting for bootstrap heartbeat: %v", err)
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
++	}
++	reader := bufio.NewReader(response.Body)
++	if frame := readSSEFrame(t, reader); frame != ": keep-alive\n" {
++		t.Fatalf("first SSE frame = %q, want bootstrap heartbeat", frame)
++	}
++
++	close(releaseExecution)
++	released = true
++	events := []struct {
++		payload       string
++		wantDeltaType string
++		wantValue     string
++	}{
++		{
++			payload:       "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"step \"}}\n\n",
++			wantDeltaType: "thinking_delta",
++			wantValue:     "step ",
++		},
++		{
++			payload:       "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"two\"}}\n\n",
++			wantDeltaType: "thinking_delta",
++			wantValue:     "two",
++		},
++		{
++			payload:       "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n",
++			wantDeltaType: "input_json_delta",
++			wantValue:     "{\"path\":",
++		},
++		{
++			payload:       "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"/tmp\\\"}\"}}\n\n",
++			wantDeltaType: "input_json_delta",
++			wantValue:     "\"/tmp\"}",
++		},
++	}
++
++	var thinking, toolJSON strings.Builder
++	for index, event := range events {
++		chunks <- coreexecutor.StreamChunk{Payload: []byte(event.payload)}
++		frame := readSSEFrame(t, reader)
++		lines := strings.Split(strings.TrimSuffix(frame, "\n"), "\n")
++		if len(lines) != 2 || lines[0] != "event: content_block_delta" || !strings.HasPrefix(lines[1], "data: ") {
++			t.Fatalf("event %d frame = %q, want one complete content_block_delta SSE frame", index, frame)
++		}
++		var envelope struct {
++			Delta struct {
++				Type        string `json:"type"`
++				Thinking    string `json:"thinking"`
++				PartialJSON string `json:"partial_json"`
++			} `json:"delta"`
++		}
++		if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[1], "data: ")), &envelope); err != nil {
++			t.Fatalf("event %d contains invalid JSON: %v; frame=%q", index, err, frame)
++		}
++		if envelope.Delta.Type != event.wantDeltaType {
++			t.Fatalf("event %d delta type = %q, want %q", index, envelope.Delta.Type, event.wantDeltaType)
++		}
++		value := envelope.Delta.Thinking
++		if event.wantDeltaType == "input_json_delta" {
++			value = envelope.Delta.PartialJSON
++			toolJSON.WriteString(value)
++		} else {
++			thinking.WriteString(value)
++		}
++		if value != event.wantValue {
++			t.Fatalf("event %d delta value = %q, want %q", index, value, event.wantValue)
++		}
++		if index < len(events)-1 {
++			if frameHeartbeat := readSSEFrame(t, reader); frameHeartbeat != ": keep-alive\n" {
++				t.Fatalf("frame after event %d = %q, want heartbeat boundary", index, frameHeartbeat)
++			}
++		}
++	}
++	close(chunks)
++
++	if thinking.String() != "step two" {
++		t.Fatalf("combined thinking delta = %q, want %q", thinking.String(), "step two")
++	}
++	if toolJSON.String() != `{"path":"/tmp"}` || !json.Valid([]byte(toolJSON.String())) {
++		t.Fatalf("combined tool JSON = %q, want valid object", toolJSON.String())
++	}
++}
++
++func TestClaudeStreamingReportsDelayedBootstrapErrorAfterHeartbeat(t *testing.T) {
++	chunks := make(chan coreexecutor.StreamChunk, 1)
++	go func() {
++		time.Sleep(1200 * time.Millisecond)
++		chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
++			HTTPStatus: http.StatusBadGateway,
++			Message:    "delayed upstream failure",
++		}}
++		close(chunks)
++	}()
++	server, model := newBootstrapHeartbeatServer(t, chunks)
++	request := newBootstrapHeartbeatRequest(t, server.URL, model)
++	client := &http.Client{Timeout: 3 * time.Second}
++
++	response, err := client.Do(request)
++	if err != nil {
++		t.Fatalf("waiting for bootstrap heartbeat: %v", err)
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		t.Fatalf("status = %d, want heartbeat-committed %d", response.StatusCode, http.StatusOK)
++	}
++	payload, err := io.ReadAll(response.Body)
++	if err != nil {
++		t.Fatalf("read delayed bootstrap error stream: %v", err)
++	}
++	text := string(payload)
++	if !strings.Contains(text, ": keep-alive\n\n") || !strings.Contains(text, "event: error\n") {
++		t.Fatalf("stream = %q, want heartbeat followed by SSE error", text)
++	}
++}
++
++func TestClaudeStreamingPreservesImmediateBootstrapErrorStatus(t *testing.T) {
++	chunks := make(chan coreexecutor.StreamChunk, 1)
++	chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
++		HTTPStatus: http.StatusBadGateway,
++		Message:    "immediate upstream failure",
++	}}
++	close(chunks)
++	server, model := newBootstrapHeartbeatServer(t, chunks)
++	request := newBootstrapHeartbeatRequest(t, server.URL, model)
++	client := &http.Client{Timeout: 2 * time.Second}
++
++	response, err := client.Do(request)
++	if err != nil {
++		t.Fatalf("waiting for immediate bootstrap error: %v", err)
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusBadGateway {
++		t.Fatalf("status = %d, want %d before heartbeat", response.StatusCode, http.StatusBadGateway)
++	}
++}
+diff --git a/internal/translator/openai/claude/openai_claude_reasoning_alias_test.go b/internal/translator/openai/claude/openai_claude_reasoning_alias_test.go
+new file mode 100644
+index 00000000..2d1de5a3
+--- /dev/null
++++ b/internal/translator/openai/claude/openai_claude_reasoning_alias_test.go
+@@ -0,0 +1,53 @@
++package claude
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestReasoningAliasesStreamBeforeCompletion(t *testing.T) {
++	for _, fields := range []string{
++		`"reasoning":"step"`,
++		`"reasoning_content":"step"`,
++		`"reasoning_content":null,"reasoning":"step"`,
++		`"reasoning_content":"","reasoning":"step"`,
++		`"reasoning_content":"step","reasoning":"duplicate"`,
++	} {
++		t.Run(fields, func(t *testing.T) {
++			var state any
++			chunks := ConvertOpenAIResponseToClaude(context.Background(), "m", []byte(streamReq), nil,
++				[]byte(`data: {"id":"c1","model":"m","choices":[{"delta":{`+fields+`},"finish_reason":null}]}`), &state)
++			var thinking strings.Builder
++			for _, chunk := range chunks {
++				for _, line := range strings.Split(string(chunk), "\n") {
++					if strings.HasPrefix(line, "data: ") {
++						payload := strings.TrimPrefix(line, "data: ")
++						if gjson.Get(payload, "delta.type").String() == "thinking_delta" {
++							thinking.WriteString(gjson.Get(payload, "delta.thinking").String())
++						}
++					}
++				}
++			}
++			if thinking.String() != "step" {
++				t.Fatalf("thinking must arrive before finish/DONE; got %q", thinking.String())
++			}
++		})
++	}
++}
++
++func TestReasoningAliasNonStream(t *testing.T) {
++	raw := []byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","reasoning":"step","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`)
++	got := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", nil, nil, raw, nil)
++	var thinking string
++	for _, block := range gjson.GetBytes(got, "content").Array() {
++		if block.Get("type").String() == "thinking" {
++			thinking += block.Get("thinking").String()
++		}
++	}
++	if thinking != "step" {
++		t.Fatalf("nonstream reasoning lost: got %q", thinking)
++	}
++}
+diff --git a/internal/runtime/executor/openai_compat_executor_reasoning_alias_test.go b/internal/runtime/executor/openai_compat_executor_reasoning_alias_test.go
+new file mode 100644
+index 00000000..dfdc467b
+--- /dev/null
++++ b/internal/runtime/executor/openai_compat_executor_reasoning_alias_test.go
+@@ -0,0 +1,63 @@
++package executor
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
++)
++
++func TestOpenAICompatExecutorVLLMReasoningArrivesBeforeFinish(t *testing.T) {
++	gate := make(chan struct{})
++	var once sync.Once
++	release := func() { once.Do(func() { close(gate) }) }
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_, _ = io.Copy(io.Discard, r.Body)
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"model\":\"dragon-qwen3.8-flash-next-nvfp4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"step\"},\"finish_reason\":null}]}\n\n")
++		w.(http.Flusher).Flush()
++		select {
++		case <-gate:
++		case <-r.Context().Done():
++			return
++		}
++		_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
++	}))
++	defer server.Close()
++	defer release()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
++	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "fixture"}}
++	body := []byte(`{"model":"dragon-qwen3.8-flash-next-nvfp4","messages":[{"role":"user","content":"fixture"}],"stream":true,"max_tokens":8}`)
++	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "dragon-qwen3.8-flash-next-nvfp4", Payload: body},
++		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: body, Stream: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	sawThinking, sawStop := false, false
++	for chunk := range result.Chunks {
++		if chunk.Err != nil {
++			t.Fatal(chunk.Err)
++		}
++		if strings.Contains(string(chunk.Payload), `"type":"thinking_delta"`) {
++			sawThinking = true
++			release()
++		}
++		if strings.Contains(string(chunk.Payload), "event: message_stop") {
++			sawStop = true
++		}
++	}
++	if !sawThinking || !sawStop {
++		t.Fatalf("thinking before finish=%t; terminal event=%t", sawThinking, sawStop)
++	}
++}
